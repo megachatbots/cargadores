@@ -7,35 +7,29 @@ const http = require('http');
 const QRCode = require('qrcode');
 const pino = require('pino');
 
-const db       = require('./src/db_cargadores');
-const motor    = require('./src/motor_cargadores');
-const timers   = require('./src/timers');
+const db    = require('./src/db_cargadores');
+const motor = require('./src/motor_cargadores');
+const timers = require('./src/timers');
 
 const GRUPO_ELECTRICOS   = process.env.GRUPO_ELECTRICOS    || 'Eléctricos';
 const GRUPO_PROYECTO_BOT = process.env.GRUPO_PROYECTO_BOT  || 'Proyecto Bot';
 const PORT               = parseInt(process.env.PORT || '3000');
-const ADMIN_IDS          = (process.env.ADMIN_IDS || '147699831668775,218643967254543')
-  .split(',').map(s => s.trim()).filter(Boolean);
+const ADMIN_IDS          = (process.env.ADMIN_IDS || '147699831668775,218643967254543,130795377307849')
+  .split(',').map(function(s) { return s.trim(); }).filter(Boolean);
 
 let ID_ELECTRICOS   = null;
 let ID_PROYECTO_BOT = null;
 let qrActual        = null;
 let conectado       = false;
 let sockRef         = null;
-
 let makeWASocket, useMultiFileAuthState, DisconnectReason;
 
 // LOGGING
-const _log = console.log.bind(console);
-console.log = (...args) => { const l = args.join(' '); _log(l); };
-const _err = console.error.bind(console);
-console.error = (...args) => { const l = args.join(' '); _err(l); };
-
-process.on('uncaughtException',  e => console.error('[UNCAUGHT]', e));
-process.on('unhandledRejection', e => console.error('[UNHANDLED]', e));
+process.on('uncaughtException',  function(e) { console.error('[UNCAUGHT]', e); });
+process.on('unhandledRejection', function(e) { console.error('[UNHANDLED]', e); });
 
 // SERVIDOR WEB
-const server = http.createServer(async (req, res) => {
+const server = http.createServer(async function(req, res) {
   if (req.url === '/qr') {
     if (conectado) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -52,7 +46,7 @@ const server = http.createServer(async (req, res) => {
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ status: conectado ? 'connected' : 'waiting_qr' }));
 });
-server.listen(PORT, '0.0.0.0', () => console.log('[WEB] Puerto ' + PORT));
+server.listen(PORT, '0.0.0.0', function() { console.log('[WEB] Puerto ' + PORT); });
 
 // ENVIO
 async function enviar(chat, texto) {
@@ -65,22 +59,30 @@ async function enviarProyectoBot(texto) {
   await enviar(ID_PROYECTO_BOT, texto);
 }
 
-async function avisarAdmins(texto) {
-  for (const id of ADMIN_IDS) {
-    const jid = id.length > 13 ? id + '@lid' : id + '@s.whatsapp.net';
-    await enviar(jid, texto);
+// HELPERS para buscar cajones (cargadores es ahora un objeto keyed por cajon)
+function _buscarCajonPorNombre(cargadores, nombre) {
+  for (const cajon in cargadores) {
+    const c = cargadores[cajon];
+    if (c.timer_conexion && c.timer_conexion.activo && c.usuario_actual === nombre) return c;
   }
+  return null;
+}
+
+function _buscarCajonConTimerConexion(cargadores) {
+  for (const cajon in cargadores) {
+    const c = cargadores[cajon];
+    if (c.timer_conexion && c.timer_conexion.activo) return c;
+  }
+  return null;
 }
 
 // FLUJO: SOLICITUD DE TURNO
 async function procesarSolicitud(nombreFrom, numeroFrom) {
   const res = await db.agregarFila(numeroFrom, nombreFrom);
-
   if (res.yaEsta) {
     await enviarProyectoBot('ℹ️ *' + nombreFrom + '* volvió a pedir lugar — ya está en posición ' + res.posicion);
     return;
   }
-
   const pos    = res.posicion;
   const hrs    = db.tiempoEstimado(pos);
   const espera = hrs === 0 ? 'hay cargador disponible ahora' : '~' + hrs + 'h de espera';
@@ -96,9 +98,8 @@ async function procesarSolicitud(nombreFrom, numeroFrom) {
 
   if (libre && pos === 1) {
     msgAdmin += '\n\n⚡ Hay cargador disponible ahora. ¿Asigno turno? Responde *sí*';
-    await db.setPendiente({ tipo: 'asignar_turno', cargador_id: libre.id, nombre: nombreFrom, numero: numeroFrom });
+    await db.setPendiente({ tipo: 'asignar_turno', cargador_id: libre.cajon, nombre: nombreFrom, numero: numeroFrom });
   }
-
   await enviarProyectoBot(msgAdmin);
   console.log('[ELÉCTRICOS] Solicitud de ' + nombreFrom + ' — posición ' + pos);
 }
@@ -106,32 +107,25 @@ async function procesarSolicitud(nombreFrom, numeroFrom) {
 // FLUJO: CARGADOR LIBRE
 async function procesarCargadorLibre() {
   const siguiente = db.primeroEnFila();
-  if (!siguiente) {
-    await enviarProyectoBot('✅ Cargador libre pero la fila está vacía.');
-    return;
-  }
+  if (!siguiente) { await enviarProyectoBot('✅ Cargador libre pero la fila está vacía.'); return; }
   const libre = db.cargadorLibre();
-  if (!libre) {
-    await enviarProyectoBot('⚠️ No hay cargadores libres disponibles.');
-    return;
-  }
-  await db.setPendiente({ tipo: 'asignar_turno', cargador_id: libre.id, nombre: siguiente.nombre, numero: siguiente.numero });
+  if (!libre)     { await enviarProyectoBot('⚠️ No hay cajones libres disponibles.'); return; }
+
+  await db.setPendiente({ tipo: 'asignar_turno', cargador_id: libre.cajon, nombre: siguiente.nombre, numero: siguiente.numero });
   await enviarProyectoBot(
     '⚡ Le toca a *' + siguiente.nombre + '*\n' +
-    'Cargador: ' + libre.id + '\n\n' +
+    'Cajón: ' + libre.cajon + '\n\n' +
     '¿Confirmas? Responde *sí*\n\n' +
     '📋 *Copiar a "Eléctricos":*\n' +
-    siguiente.nombre + ', es tu turno. Tienes 15 minutos para conectarte al cargador ' + libre.id + '.'
+    siguiente.nombre + ', es tu turno. Tienes 15 minutos para conectarte al cajón ' + libre.cajon + '.'
   );
 }
 
 // FLUJO: CONFIRMAR
 async function procesarConfirmar() {
   const pendiente = db.getPendiente();
-  if (!pendiente) {
-    await enviarProyectoBot('ℹ️ No hay pregunta pendiente que confirmar.');
-    return;
-  }
+  if (!pendiente) { await enviarProyectoBot('ℹ️ No hay pregunta pendiente que confirmar.'); return; }
+
   if (pendiente.tipo === 'asignar_turno') {
     await db.setPendiente(null);
     await timers.iniciarTimerConexion(pendiente.cargador_id, pendiente.nombre, pendiente.numero);
@@ -139,12 +133,12 @@ async function procesarConfirmar() {
       .toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Mexico_City' });
     await enviarProyectoBot(
       '✅ *Turno asignado a ' + pendiente.nombre + '*\n' +
-      'Cargador: ' + pendiente.cargador_id + '\n' +
+      'Cajón: ' + pendiente.cargador_id + '\n' +
       '⏰ Tiene hasta las ' + finTimer + ' para conectarse\n\n' +
       '📋 *Copiar a "Eléctricos":*\n' +
-      pendiente.nombre + ', es tu turno. Tienes 15 minutos para conectarte al cargador ' + pendiente.cargador_id + '.\n\n' +
+      pendiente.nombre + ', es tu turno. Tienes 15 minutos para conectarte al cajón ' + pendiente.cargador_id + '.\n\n' +
       '📋 *Copiar al ayudante:*\n' +
-      pendiente.nombre + ' va a conectar en cargador ' + pendiente.cargador_id + '.'
+      pendiente.nombre + ' va a conectar en cajón ' + pendiente.cargador_id + '.'
     );
     return;
   }
@@ -155,29 +149,21 @@ async function procesarConfirmar() {
 }
 
 // FLUJO: USUARIO CONECTÓ
-async function procesarUsuarioConecto(nombre, cargadorIdHint) {
+async function procesarUsuarioConecto(nombre, cajonHint) {
   await db.setPendiente(null);
   const estado = db.getEstado();
 
-  let cargador = estado.cargadores.find(function(c) {
-    return c.timer_conexion && c.timer_conexion.activo && c.usuario_actual === nombre;
-  });
-  if (!cargador && cargadorIdHint) {
-    cargador = estado.cargadores.find(function(c) { return c.id === cargadorIdHint; });
-  }
-  if (!cargador) {
-    cargador = estado.cargadores.find(function(c) { return c.timer_conexion && c.timer_conexion.activo; });
-  }
-  if (!cargador) {
-    await enviarProyectoBot('⚠️ No encontré turno activo para "' + nombre + '". Verifica con *estado*.');
-    return;
-  }
+  let cargador = _buscarCajonPorNombre(estado.cargadores, nombre);
+  if (!cargador && cajonHint) cargador = estado.cargadores[String(cajonHint)];
+  if (!cargador) cargador = _buscarCajonConTimerConexion(estado.cargadores);
+  if (!cargador) { await enviarProyectoBot('⚠️ No encontré turno activo para "' + nombre + '". Verifica con *estado*.'); return; }
 
-  timers.cancelarTimerConexion(cargador.id);
-  await db.confirmarConexion(cargador.id);
-  await timers.iniciarTimerSesion(cargador.id);
+  timers.cancelarTimerConexion(cargador.cajon);
+  const c = await db.confirmarConexion(cargador.cajon);
+  await timers.iniciarTimerSesion(cargador.cajon);
 
-  const finSesion = new Date(Date.now() + 3 * 60 * 60 * 1000)
+  const msSesion  = c.vip ? db.MS_SESION_VIP : db.MS_SESION;
+  const finSesion = new Date(Date.now() + msSesion)
     .toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Mexico_City' });
 
   const filaActual = db.getEstado().fila;
@@ -190,11 +176,7 @@ async function procesarUsuarioConecto(nombre, cargadorIdHint) {
     });
   }
 
-  await enviarProyectoBot(
-    '✅ *' + nombre + ' conectado*\n' +
-    'Cargador: ' + cargador.id + ' | Termina a las: ' + finSesion +
-    msgFila
-  );
+  await enviarProyectoBot('✅ *' + nombre + ' conectado*\nCajón: ' + cargador.cajon + ' | Termina a las: ' + finSesion + msgFila);
 }
 
 // FLUJO: USUARIO PERDIÓ TURNO
@@ -202,20 +184,13 @@ async function procesarUsuarioPerdio(nombre) {
   await db.setPendiente(null);
   const estado = db.getEstado();
 
-  let cargador = estado.cargadores.find(function(c) {
-    return c.timer_conexion && c.timer_conexion.activo && c.usuario_actual === nombre;
-  });
-  if (!cargador) {
-    cargador = estado.cargadores.find(function(c) { return c.timer_conexion && c.timer_conexion.activo; });
-  }
-  if (!cargador) {
-    await enviarProyectoBot('⚠️ No encontré turno activo para "' + nombre + '".');
-    return;
-  }
+  let cargador = _buscarCajonPorNombre(estado.cargadores, nombre);
+  if (!cargador) cargador = _buscarCajonConTimerConexion(estado.cargadores);
+  if (!cargador) { await enviarProyectoBot('⚠️ No encontré turno activo para "' + nombre + '".'); return; }
 
   const numActual = cargador.numero_actual;
-  timers.cancelarTimerConexion(cargador.id);
-  await db.liberarCargador(cargador.id);
+  timers.cancelarTimerConexion(cargador.cajon);
+  await db.liberarCajon(cargador.cajon);
   const res = await db.moverAlFinal(numActual || nombre);
   const nuevaPos = res ? res.posicion : '?';
 
@@ -230,29 +205,55 @@ async function procesarUsuarioPerdio(nombre) {
     const libreAhora = db.cargadorLibre();
     if (libreAhora) {
       msg += '\n\n⚡ Le toca ahora a *' + siguiente.nombre + '*. ¿Confirmas? Responde *sí*';
-      await db.setPendiente({ tipo: 'asignar_turno', cargador_id: libreAhora.id, nombre: siguiente.nombre, numero: siguiente.numero });
+      await db.setPendiente({ tipo: 'asignar_turno', cargador_id: libreAhora.cajon, nombre: siguiente.nombre, numero: siguiente.numero });
     }
   }
-
   await enviarProyectoBot(msg);
 }
 
-// FLUJO: ESPERAR (extender 15 min)
+// FLUJO: ESPERAR
 async function procesarEsperar() {
   await db.setPendiente(null);
-  const estado = db.getEstado();
-  const cargador = estado.cargadores.find(function(c) { return c.timer_conexion && c.timer_conexion.activo; });
-  if (!cargador) {
-    await enviarProyectoBot('⚠️ No hay timer de conexión activo para extender.');
-    return;
-  }
-  await timers.extenderTimerConexion(cargador.id);
+  const estado   = db.getEstado();
+  const cargador = _buscarCajonConTimerConexion(estado.cargadores);
+  if (!cargador) { await enviarProyectoBot('⚠️ No hay timer de conexión activo para extender.'); return; }
+
+  await timers.extenderTimerConexion(cargador.cajon);
   const finTimer = new Date(Date.now() + 15 * 60 * 1000)
     .toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Mexico_City' });
-  await enviarProyectoBot(
-    '⏳ *Extendido 15 min para ' + cargador.usuario_actual + '*\n' +
-    'Nuevo límite: ' + finTimer
-  );
+  await enviarProyectoBot('⏳ *Extendido 15 min para ' + cargador.usuario_actual + '*\nNuevo límite: ' + finTimer);
+}
+
+// FLUJO: ESTADO INICIAL (reporte matutino copiado por admin)
+async function procesarEstadoInicial(texto) {
+  const items = motor.parsearReporteMatutino(texto);
+  if (!items || !items.length) {
+    await enviarProyectoBot('❌ No pude interpretar el reporte. Verifica el formato:\nCajón 41\nNombre 9:30-12:30\nMarca\nPlacas');
+    return;
+  }
+  await db.cargarEstadoInicial(items);
+
+  let resumen = '🌅 *Estado inicial cargado*\n\n';
+  for (const item of items) {
+    if (item.ocupado) {
+      resumen += '🔴 Cajón ' + item.cajon + ': ' + item.nombre;
+      if (item.horaInicio) resumen += ' (desde ' + item.horaInicio + ')';
+      resumen += '\n';
+    } else {
+      resumen += '🟢 Cajón ' + item.cajon + ': Libre\n';
+    }
+  }
+  resumen += '\n' + db.resumenCargadores();
+  await enviarProyectoBot(resumen);
+
+  // Reactivar timers para los cajones con sesión activa
+  const estado = db.getEstado();
+  for (const cajon in estado.cargadores) {
+    const c = estado.cargadores[cajon];
+    if (c.timer_sesion && c.timer_sesion.activo) {
+      await timers.reactivarTimerSesionCajon(cajon);
+    }
+  }
 }
 
 // PROCESAR GRUPO ELÉCTRICOS
@@ -266,6 +267,22 @@ async function procesarElectricos(texto, numeroFrom, nombreFrom) {
 async function procesarProyectoBot(texto, numeroFrom, nombreFrom) {
   if (!ADMIN_IDS.includes(numeroFrom)) return;
 
+  const tl = texto.toLowerCase().trim();
+
+  // Comandos directos sin AI
+  if (tl === 'reiniciar estado') {
+    await db.reiniciar();
+    await enviarProyectoBot('🔄 Estado reiniciado. Todos los cajones libres y fila vacía.');
+    return;
+  }
+
+  // Detectar reporte matutino pegado por el admin
+  if (motor.esReporteMatutino(texto)) {
+    await procesarEstadoInicial(texto);
+    return;
+  }
+
+  // Comandos via AI
   const r = await motor.parsearComandoAdmin(texto, nombreFrom);
   if (!r.comando) return;
 
@@ -282,7 +299,7 @@ async function procesarProyectoBot(texto, numeroFrom, nombreFrom) {
     case 'quitar_usuario': {
       if (!r.nombre) { await enviarProyectoBot('❌ Indica el nombre. Ej: "quitar a Juan"'); return; }
       const est = db.getEstado();
-      const u = est.fila.find(function(x) { return x.nombre.toLowerCase().includes(r.nombre.toLowerCase()); });
+      const u   = est.fila.find(function(x) { return x.nombre.toLowerCase().includes(r.nombre.toLowerCase()); });
       if (!u) { await enviarProyectoBot('❌ "' + r.nombre + '" no está en la fila'); return; }
       await db.quitarFila(u.numero);
       await enviarProyectoBot('✅ ' + u.nombre + ' quitado de la fila');
@@ -301,14 +318,16 @@ async function procesarPrivado(chat, texto, numeroFrom) {
     if (tl === 'ayuda') {
       await enviar(chat,
         '🔌 *Comandos (en Proyecto Bot)*\n\n' +
-        '• *cargador libre* — hay cargador disponible\n' +
+        '• Pegar reporte matutino → carga estado inicial\n' +
+        '• *cargador libre* — hay cajón disponible\n' +
         '• *[Nombre] conectó* — confirmar conexión\n' +
         '• *[Nombre] no llegó* — perdió su turno\n' +
         '• *esperar* — dar 15 min más\n' +
         '• *sí* — confirmar pregunta pendiente\n' +
         '• *fila* — ver lista de espera\n' +
-        '• *estado* — ver cargadores y fila\n' +
-        '• *quitar a [Nombre]* — sacar de la fila'
+        '• *estado* — ver cajones y fila\n' +
+        '• *quitar a [Nombre]* — sacar de la fila\n' +
+        '• *reiniciar estado* — borrar todo y empezar de cero'
       );
       return;
     }
@@ -320,11 +339,7 @@ async function iniciarBot() {
   console.log('[BAILEYS] Iniciando...');
   const { state, saveCreds } = await useMultiFileAuthState('auth_info');
   const waVersion = [2, 3000, 1040125391];
-  const sock = makeWASocket({
-    version: waVersion, auth: state,
-    logger: pino({ level: 'silent' }),
-    browser: ['Mac OS', 'Safari', '10.15.7']
-  });
+  const sock = makeWASocket({ version: waVersion, auth: state, logger: pino({ level: 'silent' }), browser: ['Mac OS', 'Safari', '10.15.7'] });
   sockRef = sock;
   timers.setEnviarFn(enviarProyectoBot);
 
@@ -346,22 +361,17 @@ async function iniciarBot() {
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('messages.upsert', async function(payload) {
-    const messages = payload.messages;
-    const type = payload.type;
-    if (type !== 'notify') return;
-    for (const msg of messages) {
+    if (payload.type !== 'notify') return;
+    for (const msg of payload.messages) {
       if (msg.key.fromMe || !msg.message) continue;
       const chat       = msg.key.remoteJid;
       const esGrupo    = chat.endsWith('@g.us');
-      const numeroFrom = (msg.key.participant || msg.key.remoteJid)
-        .replace('@s.whatsapp.net', '').replace('@lid', '');
+      const numeroFrom = (msg.key.participant || msg.key.remoteJid).replace('@s.whatsapp.net', '').replace('@lid', '');
       const texto      = (msg.message.conversation || (msg.message.extendedTextMessage && msg.message.extendedTextMessage.text) || '');
       if (!texto.trim()) continue;
       const nombreFrom = msg.pushName || numeroFrom;
-
-      const canal = esGrupo ? (chat === ID_ELECTRICOS ? 'ELÉCTRICOS' : chat === ID_PROYECTO_BOT ? 'PROYECTO BOT' : 'OTRO') : 'PRIV';
+      const canal      = esGrupo ? (chat === ID_ELECTRICOS ? 'ELÉCTRICOS' : chat === ID_PROYECTO_BOT ? 'PROYECTO BOT' : 'OTRO') : 'PRIV';
       console.log('[MSG][' + canal + '] ' + nombreFrom + ': ' + texto.substring(0, 60));
-
       try {
         if (esGrupo) {
           if      (chat === ID_ELECTRICOS)   await procesarElectricos(texto, numeroFrom, nombreFrom);
@@ -400,8 +410,6 @@ async function arrancar() {
     await db.inicializar();
     await timers.reactivarTimers();
     await iniciarBot();
-  } catch (e) {
-    console.error('[ARRANQUE] ERROR FATAL:', e);
-  }
+  } catch (e) { console.error('[ARRANQUE] ERROR FATAL:', e); }
 }
 arrancar();

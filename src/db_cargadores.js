@@ -1,27 +1,23 @@
-// src/db_cargadores.js — Estado de cargadores eléctricos (independiente del torneo)
+// src/db_cargadores.js — Estado de cargadores eléctricos
 const { Pool } = require('pg');
 
-const NUM_CARGADORES = 6;
-const MS_CONEXION = 15 * 60 * 1000;   // 15 minutos
-const MS_SESION   = 3 * 60 * 60 * 1000; // 3 horas
+const CAJONES         = ['41','42','44','45','46','48','49','50'];
+const CAJONES_VIP     = new Set(['46','50']);
+const NUM_CARGADORES  = CAJONES.length;
+const MS_CONEXION     = 15 * 60 * 1000;
+const MS_SESION       = 3 * 60 * 60 * 1000;
+const MS_SESION_VIP   = 8 * 60 * 60 * 1000;
 
 let pgClient = null;
-let estado = null;
-// estado: { fila, cargadores, proximoId, pendiente }
-// pendiente: { tipo, cargador_id, nombre } — pregunta abierta esperando confirmación
+let estado   = null;
 
-// ─── POSTGRES ─────────────────────────────────────────────────────────
+// POSTGRES
 async function conectarPG() {
   if (pgClient) return pgClient;
   if (!process.env.DATABASE_URL) return null;
   try {
-    const pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: false },
-      max: 3
-    });
-    await pool.query(`CREATE TABLE IF NOT EXISTS cargadores_bot
-      (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMP DEFAULT NOW())`);
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false }, max: 3 });
+    await pool.query('CREATE TABLE IF NOT EXISTS cargadores_bot (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMP DEFAULT NOW())');
     pgClient = pool;
     return pgClient;
   } catch (e) { console.error('[DB_C] Error PG:', e.message); return null; }
@@ -39,40 +35,48 @@ async function pgSet(key, value) {
   const c = await conectarPG(); if (!c) return false;
   try {
     await c.query(
-      `INSERT INTO cargadores_bot (key,value,updated_at) VALUES ($1,$2,NOW())
-       ON CONFLICT (key) DO UPDATE SET value=$2, updated_at=NOW()`,
+      'INSERT INTO cargadores_bot (key,value,updated_at) VALUES ($1,$2,NOW()) ON CONFLICT (key) DO UPDATE SET value=$2, updated_at=NOW()',
       [key, JSON.stringify(value)]
     );
     return true;
   } catch (e) { console.error('[DB_C] pgSet:', e.message); return false; }
 }
 
-// ─── ESTADO INICIAL ───────────────────────────────────────────────────
-function estadoVacio() {
+// ESTADO INICIAL
+function cajonVacio(cajon) {
   return {
-    fila: [],
-    cargadores: Array.from({ length: NUM_CARGADORES }, (_, i) => ({
-      id: i + 1,
-      ocupado: false,
-      usuario_actual: null,
-      numero_actual: null,
-      hora_inicio: null,
-      timer_conexion: { activo: false, hora_inicio: null, duracion_ms: MS_CONEXION, extensiones: 0 },
-      timer_sesion:   { activo: false, hora_inicio: null, duracion_ms: MS_SESION }
-    })),
-    proximoId: 1,
-    pendiente: null  // { tipo: 'asignar_turno'|'conexion_vencida', cargador_id, nombre, numero }
+    cajon,
+    vip: CAJONES_VIP.has(String(cajon)),
+    ocupado: false,
+    usuario_actual: null,
+    numero_actual: null,
+    marca: null,
+    placas: null,
+    hora_inicio: null,
+    timer_conexion: { activo: false, hora_inicio: null, duracion_ms: MS_CONEXION, extensiones: 0 },
+    timer_sesion:   { activo: false, hora_inicio: null, duracion_ms: MS_SESION }
   };
 }
 
-// ─── INICIALIZACIÓN ───────────────────────────────────────────────────
+function estadoVacio() {
+  const cargadores = {};
+  for (const c of CAJONES) cargadores[c] = cajonVacio(c);
+  return { fila: [], cargadores, proximoId: 1, pendiente: null };
+}
+
+// INICIALIZACIÓN
 async function inicializar() {
   await conectarPG();
   const guardado = await pgGet('estado_cargadores');
   if (guardado) {
     estado = guardado;
-    // Migración: asegurar campo pendiente
     if (estado.pendiente === undefined) estado.pendiente = null;
+    // Migración: si los cargadores son array viejo (1-6), reiniciar
+    if (Array.isArray(estado.cargadores)) {
+      console.log('[DB_C] Migrando estado antiguo a cajones reales');
+      estado = estadoVacio();
+      await guardar('migracion cajones');
+    }
     console.log('[DB_C] Estado cargadores cargado desde PostgreSQL');
   } else {
     estado = estadoVacio();
@@ -82,184 +86,221 @@ async function inicializar() {
   return estado;
 }
 
-async function guardar(motivo = 'cambio') {
+async function guardar(motivo) {
   await pgSet('estado_cargadores', estado);
+}
+
+async function reiniciar() {
+  estado = estadoVacio();
+  await guardar('reinicio manual');
+  return true;
 }
 
 function getEstado() { return estado; }
 
-// ─── FILA ─────────────────────────────────────────────────────────────
-// Agrega usuario a la fila. Devuelve { ok, posicion, yaEsta }
+// FILA
 async function agregarFila(numero, nombre) {
-  const yaEsta = estado.fila.find(u => u.numero === numero);
-  if (yaEsta) {
-    return { ok: false, yaEsta: true, posicion: estado.fila.indexOf(yaEsta) + 1 };
-  }
-  const item = {
-    id: estado.proximoId++,
-    numero,
-    nombre: nombre || numero,
-    hora_solicitud: new Date().toISOString()
-  };
+  const yaEsta = estado.fila.find(function(u) { return u.numero === numero; });
+  if (yaEsta) return { ok: false, yaEsta: true, posicion: estado.fila.indexOf(yaEsta) + 1 };
+  const item = { id: estado.proximoId++, numero, nombre: nombre || numero, hora_solicitud: new Date().toISOString() };
   estado.fila.push(item);
   await guardar('agregar fila');
   return { ok: true, posicion: estado.fila.length, item };
 }
 
-// Mueve usuario al final de la fila (perdió turno)
 async function moverAlFinal(numero) {
-  const idx = estado.fila.findIndex(u => u.numero === numero);
+  const idx = estado.fila.findIndex(function(u) { return u.numero === numero; });
   if (idx === -1) return null;
-  const [item] = estado.fila.splice(idx, 1);
-  item.hora_solicitud = new Date().toISOString(); // actualizar timestamp
+  const item = estado.fila.splice(idx, 1)[0];
+  item.hora_solicitud = new Date().toISOString();
   estado.fila.push(item);
   await guardar('mover al final');
   return { posicion: estado.fila.length, item };
 }
 
-// Quita usuario de la fila por número
 async function quitarFila(numero) {
-  const idx = estado.fila.findIndex(u => u.numero === numero);
+  const idx = estado.fila.findIndex(function(u) { return u.numero === numero; });
   if (idx === -1) return { ok: false, msg: 'Usuario no encontrado en la fila' };
-  const [item] = estado.fila.splice(idx, 1);
+  const item = estado.fila.splice(idx, 1)[0];
   await guardar('quitar fila');
   return { ok: true, nombre: item.nombre };
 }
 
-// Primero en la fila
-function primeroEnFila() {
-  return estado.fila[0] || null;
-}
+function primeroEnFila() { return estado.fila[0] || null; }
 
-// ─── CARGADORES ───────────────────────────────────────────────────────
+// CARGADORES
 function cargadorLibre() {
-  return estado.cargadores.find(c => !c.ocupado) || null;
+  for (const cajon of CAJONES) {
+    const c = estado.cargadores[cajon];
+    if (!c.ocupado && !c.timer_conexion.activo) return c;
+  }
+  return null;
 }
 
 function numLibres() {
-  return estado.cargadores.filter(c => !c.ocupado).length;
+  return CAJONES.filter(function(cajon) {
+    const c = estado.cargadores[cajon];
+    return !c.ocupado && !c.timer_conexion.activo;
+  }).length;
 }
 
-// Inicia timer de conexión (15 min) para un usuario
-async function iniciarTimerConexion(cargadorId, nombre, numero) {
-  const c = estado.cargadores.find(x => x.id === cargadorId);
+async function iniciarTimerConexion(cajon, nombre, numero) {
+  cajon = String(cajon);
+  const c = estado.cargadores[cajon];
   if (!c) return null;
   c.usuario_actual = nombre;
   c.numero_actual  = numero;
-  c.timer_conexion = {
-    activo: true,
-    hora_inicio: new Date().toISOString(),
-    duracion_ms: MS_CONEXION,
-    extensiones: 0
-  };
-  await guardar(`timer conexion cargador ${cargadorId}`);
+  c.timer_conexion = { activo: true, hora_inicio: new Date().toISOString(), duracion_ms: MS_CONEXION, extensiones: 0 };
+  await guardar('timer conexion ' + cajon);
   return c;
 }
 
-// Extiende timer de conexión 15 min más
-async function extenderTimerConexion(cargadorId) {
-  const c = estado.cargadores.find(x => x.id === cargadorId);
+async function extenderTimerConexion(cajon) {
+  cajon = String(cajon);
+  const c = estado.cargadores[cajon];
   if (!c || !c.timer_conexion.activo) return null;
   c.timer_conexion.hora_inicio = new Date().toISOString();
   c.timer_conexion.extensiones++;
-  await guardar(`extender timer cargador ${cargadorId}`);
+  await guardar('extender timer ' + cajon);
   return c;
 }
 
-// Cancela timer de conexión e inicia timer de sesión (usuario se conectó)
-async function confirmarConexion(cargadorId) {
-  const c = estado.cargadores.find(x => x.id === cargadorId);
+async function confirmarConexion(cajon) {
+  cajon = String(cajon);
+  const c = estado.cargadores[cajon];
   if (!c) return null;
-  c.ocupado         = true;
-  c.hora_inicio     = new Date().toISOString();
-  c.timer_conexion  = { activo: false, hora_inicio: null, duracion_ms: MS_CONEXION, extensiones: 0 };
-  c.timer_sesion    = { activo: true, hora_inicio: new Date().toISOString(), duracion_ms: MS_SESION };
-  // Sacar al usuario de la fila
-  estado.fila = estado.fila.filter(u => u.numero !== c.numero_actual);
-  await guardar(`conexion confirmada cargador ${cargadorId}`);
+  const msSesion = c.vip ? MS_SESION_VIP : MS_SESION;
+  c.ocupado        = true;
+  c.hora_inicio    = new Date().toISOString();
+  c.timer_conexion = { activo: false, hora_inicio: null, duracion_ms: MS_CONEXION, extensiones: 0 };
+  c.timer_sesion   = { activo: true, hora_inicio: new Date().toISOString(), duracion_ms: msSesion };
+  estado.fila = estado.fila.filter(function(u) { return u.numero !== c.numero_actual; });
+  await guardar('conexion confirmada ' + cajon);
   return c;
 }
 
-// Libera un cargador (sesión terminó o usuario perdió turno)
-async function liberarCargador(cargadorId) {
-  const c = estado.cargadores.find(x => x.id === cargadorId);
+async function liberarCajon(cajon) {
+  cajon = String(cajon);
+  const c = estado.cargadores[cajon];
   if (!c) return null;
   const nombre = c.usuario_actual;
-  c.ocupado        = false;
-  c.usuario_actual = null;
-  c.numero_actual  = null;
-  c.hora_inicio    = null;
-  c.timer_conexion = { activo: false, hora_inicio: null, duracion_ms: MS_CONEXION, extensiones: 0 };
-  c.timer_sesion   = { activo: false, hora_inicio: null, duracion_ms: MS_SESION };
-  await guardar(`liberar cargador ${cargadorId}`);
-  return { cargadorId, nombre };
+  estado.cargadores[cajon] = cajonVacio(cajon);
+  await guardar('liberar ' + cajon);
+  return { cajon, nombre };
 }
 
-// ─── PENDIENTE (pregunta abierta del bot) ─────────────────────────────
-async function setPendiente(p) {
-  estado.pendiente = p; // null para limpiar
-  await guardar('pendiente');
+// CARGA DE ESTADO MATUTINO
+// items: [{ cajon, ocupado, nombre, marca, placas, horaInicio, horaFin }]
+async function cargarEstadoInicial(items) {
+  for (const item of items) {
+    const cajon = String(item.cajon);
+    if (!CAJONES.includes(cajon)) continue;
+    if (!item.ocupado) {
+      estado.cargadores[cajon] = cajonVacio(cajon);
+      continue;
+    }
+    const c = cajonVacio(cajon);
+    c.ocupado        = true;
+    c.usuario_actual = item.nombre || '?';
+    c.marca          = item.marca  || null;
+    c.placas         = item.placas || null;
+
+    // Calcular timer de sesión desde hora de inicio
+    if (item.horaInicio && !c.vip) {
+      const msSesion = MS_SESION;
+      const inicio   = _parsearHoraHoy(item.horaInicio);
+      if (inicio) {
+        c.hora_inicio  = inicio.toISOString();
+        const finMs    = inicio.getTime() + msSesion;
+        const ahoraMs  = Date.now();
+        if (finMs > ahoraMs) {
+          // Timer aún activo
+          c.timer_sesion = { activo: true, hora_inicio: inicio.toISOString(), duracion_ms: msSesion };
+        }
+        // Si ya venció, registrar como ocupado sin timer (admin decide)
+      }
+    }
+    // VIP: ocupado sin timer
+    estado.cargadores[cajon] = c;
+  }
+  await guardar('estado inicial cargado');
+  return true;
 }
 
+// PENDIENTE
+async function setPendiente(p) { estado.pendiente = p; await guardar('pendiente'); }
 function getPendiente() { return estado.pendiente; }
 
-// ─── TIEMPO ESTIMADO ──────────────────────────────────────────────────
-// Calcula tiempo estimado de espera para una posición en la fila
+// TIEMPO ESTIMADO
 function tiempoEstimado(posicion) {
   const libres = numLibres();
-  if (posicion <= libres) return 0; // disponible ahora
-  return Math.ceil((posicion - libres) / NUM_CARGADORES) * 3; // horas
+  if (posicion <= libres) return 0;
+  return Math.ceil((posicion - libres) / NUM_CARGADORES) * 3;
 }
 
-// ─── RESÚMENES ────────────────────────────────────────────────────────
+// RESÚMENES
 function resumenFila() {
   if (!estado.fila.length) return '📋 *Fila de espera*\n\nNo hay nadie en la fila ✅';
-  let txt = `📋 *Fila de espera* (${estado.fila.length} personas)\n\n`;
-  estado.fila.forEach((u, i) => {
+  let txt = '📋 *Fila de espera* (' + estado.fila.length + ' personas)\n\n';
+  estado.fila.forEach(function(u, i) {
     const hrs = tiempoEstimado(i + 1);
-    const espera = hrs === 0 ? 'disponible ahora' : `~${hrs}h de espera`;
-    txt += `${i + 1}. ${u.nombre} — ${espera}\n`;
+    txt += (i + 1) + '. ' + u.nombre + ' — ' + (hrs === 0 ? 'disponible ahora' : '~' + hrs + 'h') + '\n';
   });
   return txt;
 }
 
 function resumenCargadores() {
-  let txt = '🔌 *Estado de cargadores*\n\n';
-  for (const c of estado.cargadores) {
+  let txt = '🔌 *Estado de cajones*\n\n';
+  for (const cajon of CAJONES) {
+    const c = estado.cargadores[cajon];
+    const vipTag = c.vip ? ' ⭐' : '';
     if (c.ocupado) {
-      const fin = c.timer_sesion.activo
-        ? _horaLocal(new Date(new Date(c.timer_sesion.hora_inicio).getTime() + c.timer_sesion.duracion_ms).toISOString())
-        : '?';
-      txt += `🔴 Cargador ${c.id}: ${c.usuario_actual} hasta ${fin}\n`;
-    } else if (c.timer_conexion.activo) {
+      let fin = '?';
+      if (c.timer_sesion && c.timer_sesion.activo) {
+        fin = _horaLocal(new Date(new Date(c.timer_sesion.hora_inicio).getTime() + c.timer_sesion.duracion_ms).toISOString());
+      }
+      txt += '🔴 Cajón ' + cajon + vipTag + ': ' + c.usuario_actual + ' hasta ' + fin;
+      if (c.placas) txt += ' (' + c.placas + ')';
+      txt += '\n';
+    } else if (c.timer_conexion && c.timer_conexion.activo) {
       const fin = _horaLocal(new Date(new Date(c.timer_conexion.hora_inicio).getTime() + c.timer_conexion.duracion_ms).toISOString());
-      txt += `🟡 Cargador ${c.id}: esperando a ${c.usuario_actual} hasta ${fin}\n`;
+      txt += '🟡 Cajón ' + cajon + vipTag + ': esperando a ' + c.usuario_actual + ' hasta ' + fin + '\n';
     } else {
-      txt += `🟢 Cargador ${c.id}: Libre\n`;
+      txt += '🟢 Cajón ' + cajon + vipTag + ': Libre\n';
     }
   }
-  txt += `\n*${numLibres()}/${NUM_CARGADORES} libres*`;
+  txt += '\n*' + numLibres() + '/' + NUM_CARGADORES + ' libres*';
   return txt;
 }
 
-function resumenCompleto() {
-  return resumenCargadores() + '\n\n' + resumenFila();
-}
+function resumenCompleto() { return resumenCargadores() + '\n\n' + resumenFila(); }
 
-// ─── UTILS ────────────────────────────────────────────────────────────
+// UTILS
 function _horaLocal(iso) {
   if (!iso) return '?';
-  return new Date(iso).toLocaleTimeString('es-MX', {
-    hour: '2-digit', minute: '2-digit', timeZone: 'America/Mexico_City'
-  });
+  return new Date(iso).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Mexico_City' });
+}
+
+function _parsearHoraHoy(horaStr) {
+  // "9:30" → Date de hoy con esa hora en México
+  const m = horaStr.match(/(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const ahora = new Date();
+  // Convertir a hora México
+  const fechaMex = new Date(ahora.toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+  fechaMex.setHours(parseInt(m[1]), parseInt(m[2]), 0, 0);
+  // Ajustar offset
+  const offset = ahora.getTime() - new Date(ahora.toLocaleString('en-US', { timeZone: 'America/Mexico_City' })).getTime();
+  return new Date(fechaMex.getTime() + offset);
 }
 
 module.exports = {
-  inicializar, getEstado, guardar,
+  inicializar, getEstado, guardar, reiniciar,
   agregarFila, moverAlFinal, quitarFila, primeroEnFila,
   cargadorLibre, numLibres, tiempoEstimado,
-  iniciarTimerConexion, extenderTimerConexion, confirmarConexion, liberarCargador,
+  iniciarTimerConexion, extenderTimerConexion, confirmarConexion, liberarCajon,
+  cargarEstadoInicial,
   setPendiente, getPendiente,
   resumenFila, resumenCargadores, resumenCompleto,
-  MS_CONEXION, MS_SESION, NUM_CARGADORES
+  MS_CONEXION, MS_SESION, MS_SESION_VIP, CAJONES, CAJONES_VIP
 };
