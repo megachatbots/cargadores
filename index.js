@@ -68,7 +68,9 @@ async function enviar(chat, texto) {
 
 async function avisarAdmin(texto) {
   for (const id of ADMIN_IDS) {
-    const jid = id.includes('@') ? id : `${id}@s.whatsapp.net`;
+    if (id.includes('@')) { await enviar(id, texto); continue; }
+    // LIDs son numeros grandes >13 digitos
+    const jid = id.length > 13 ? `${id}@lid` : `${id}@s.whatsapp.net`;
     await enviar(jid, texto);
   }
 }
