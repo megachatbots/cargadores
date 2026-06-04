@@ -1,0 +1,15 @@
+{
+  "cargadores": {
+    "41": { "estado": "libre", "usuario": null, "nombre": null, "desde": null, "hasta": null, "marca": null, "placas": null },
+    "42": { "estado": "libre", "usuario": null, "nombre": null, "desde": null, "hasta": null, "marca": null, "placas": null },
+    "44": { "estado": "libre", "usuario": null, "nombre": null, "desde": null, "hasta": null, "marca": null, "placas": null },
+    "45": { "estado": "libre", "usuario": null, "nombre": null, "desde": null, "hasta": null, "marca": null, "placas": null },
+    "46": { "estado": "libre", "usuario": null, "nombre": null, "desde": null, "hasta": null, "marca": null, "placas": null },
+    "48": { "estado": "libre", "usuario": null, "nombre": null, "desde": null, "hasta": null, "marca": null, "placas": null },
+    "49": { "estado": "libre", "usuario": null, "nombre": null, "desde": null, "hasta": null, "marca": null, "placas": null },
+    "50": { "estado": "libre", "usuario": null, "nombre": null, "desde": null, "hasta": null, "marca": null, "placas": null }
+  },
+  "fila": [],
+  "historial": [],
+  "proximoId": 1
+}
