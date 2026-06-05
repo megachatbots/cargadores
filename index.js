@@ -114,7 +114,7 @@ async function procesarSolicitud(nombreFrom, numeroFrom) {
   }
   await enviarProyectoBot(msgAdmin);
   // Bot responde al usuario en Eléctricos
-  await enviarElectricos('@' + numeroFrom + ' Buen día, quedaste anotado en la lista de espera 👍', numeroFrom);
+  await enviarElectricos(nombreFrom + ' @' + numeroFrom + ' Buen día, te anotamos en la lista de espera 👍', numeroFrom);
   console.log('[ELÉCTRICOS] Solicitud de ' + nombreFrom + ' — posición ' + pos);
 }
 
