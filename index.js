@@ -59,8 +59,15 @@ async function enviarProyectoBot(texto) {
   await enviar(ID_PROYECTO_BOT, texto);
 }
 
-async function enviarElectricos(texto) {
+async function enviarElectricos(texto, mencionNumero) {
   if (!ID_ELECTRICOS) { console.log('[enviarElectricos] ID no disponible'); return; }
+  if (mencionNumero) {
+    const jid = mencionNumero.includes('@') ? mencionNumero : mencionNumero + '@s.whatsapp.net';
+    try {
+      await sockRef.sendMessage(ID_ELECTRICOS, { text: texto, mentions: [jid] });
+      return;
+    } catch (e) { console.log('[enviarElectricos]', e.message); }
+  }
   await enviar(ID_ELECTRICOS, texto);
 }
 
@@ -107,7 +114,7 @@ async function procesarSolicitud(nombreFrom, numeroFrom) {
   }
   await enviarProyectoBot(msgAdmin);
   // Bot responde al usuario en Eléctricos
-  await enviarElectricos('Buen día ' + nombreFrom + ', quedaste anotado en la lista de espera 👍');
+  await enviarElectricos('@' + numeroFrom + ' Buen día, quedaste anotado en la lista de espera 👍', numeroFrom);
   console.log('[ELÉCTRICOS] Solicitud de ' + nombreFrom + ' — posición ' + pos);
 }
 
