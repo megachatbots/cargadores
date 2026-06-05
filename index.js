@@ -59,6 +59,11 @@ async function enviarProyectoBot(texto) {
   await enviar(ID_PROYECTO_BOT, texto);
 }
 
+async function enviarElectricos(texto) {
+  if (!ID_ELECTRICOS) { console.log('[enviarElectricos] ID no disponible'); return; }
+  await enviar(ID_ELECTRICOS, texto);
+}
+
 // HELPERS para buscar cajones (cargadores es ahora un objeto keyed por cajon)
 function _buscarCajonPorNombre(cargadores, nombre) {
   for (const cajon in cargadores) {
@@ -101,6 +106,8 @@ async function procesarSolicitud(nombreFrom, numeroFrom) {
     await db.setPendiente({ tipo: 'asignar_turno', cargador_id: libre.cajon, nombre: nombreFrom, numero: numeroFrom });
   }
   await enviarProyectoBot(msgAdmin);
+  // Bot responde al usuario en Eléctricos
+  await enviarElectricos('Buen día ' + nombreFrom + ', quedaste anotado en la lista de espera 👍');
   console.log('[ELÉCTRICOS] Solicitud de ' + nombreFrom + ' — posición ' + pos);
 }
 
@@ -231,7 +238,7 @@ async function procesarEstadoInicial(texto) {
     await enviarProyectoBot('❌ No pude interpretar el reporte. Verifica el formato:\nCajón 41\nNombre 9:30-12:30\nMarca\nPlacas');
     return;
   }
-  await db.cargarEstadoInicial(items);
+  const resultado = await db.cargarEstadoInicial(items);
 
   let resumen = '🌅 *Estado inicial cargado*\n\n';
   for (const item of items) {
@@ -242,6 +249,9 @@ async function procesarEstadoInicial(texto) {
     } else {
       resumen += '🟢 Cajón ' + item.cajon + ': Libre\n';
     }
+  }
+  if (resultado && resultado.sacados > 0) {
+    resumen += '\n✂️ ' + resultado.sacados + ' persona(s) quitada(s) de la fila por ya estar conectadas.\n';
   }
   resumen += '\n' + db.resumenCargadores();
   await enviarProyectoBot(resumen);
@@ -258,6 +268,8 @@ async function procesarEstadoInicial(texto) {
 
 // PROCESAR GRUPO ELÉCTRICOS
 async function procesarElectricos(texto, numeroFrom, nombreFrom) {
+  // Ignorar mensajes de admins en Eléctricos
+  if (ADMIN_IDS.includes(numeroFrom)) return;
   const r = await motor.detectarSolicitud(texto, nombreFrom);
   if (!r.es_solicitud) return;
   await procesarSolicitud(nombreFrom, numeroFrom);
@@ -399,6 +411,40 @@ async function detectarGrupos(sock) {
   } catch (e) { console.log('[detectarGrupos]', e.message); }
 }
 
+// REINICIO AUTOMÁTICO A MEDIANOCHE HORA MÉXICO
+function programarReinicioNocturno() {
+  const ahora = new Date();
+  // Calcular siguiente medianoche en México (UTC-6)
+  const ahoraMex = new Date(ahora.toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+  const manana = new Date(ahoraMex);
+  manana.setDate(manana.getDate() + 1);
+  manana.setHours(0, 0, 0, 0);
+  const offset = ahora.getTime() - ahoraMex.getTime();
+  const medianoche = new Date(manana.getTime() + offset);
+  const msHastaMedianoche = medianoche.getTime() - ahora.getTime();
+
+  console.log('[reinicio] Próximo reinicio nocturno en ' + Math.round(msHastaMedianoche / 60000) + ' minutos');
+
+  setTimeout(async function() {
+    console.log('[reinicio] Ejecutando reinicio nocturno...');
+    try {
+      // Cancelar todos los timers activos
+      const estado = db.getEstado();
+      for (const cajon in estado.cargadores) {
+        timers.cancelarTimerConexion(cajon);
+        timers.cancelarTimerSesion(cajon);
+      }
+      await db.reiniciarTodo();
+      await enviarProyectoBot('🌙 Reinicio automático de medianoche completado. Sistema listo para el nuevo día.');
+      console.log('[reinicio] Reinicio nocturno completado');
+    } catch (e) {
+      console.error('[reinicio] Error en reinicio nocturno:', e.message);
+    }
+    // Programar el siguiente
+    programarReinicioNocturno();
+  }, msHastaMedianoche);
+}
+
 // ARRANQUE
 async function arrancar() {
   console.log('Bot Cargadores Eléctricos — Fase 2');
@@ -409,6 +455,7 @@ async function arrancar() {
     DisconnectReason      = baileys.DisconnectReason;
     await db.inicializar();
     await timers.reactivarTimers();
+    programarReinicioNocturno();
     await iniciarBot();
   } catch (e) { console.error('[ARRANQUE] ERROR FATAL:', e); }
 }

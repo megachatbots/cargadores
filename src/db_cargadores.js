@@ -96,6 +96,12 @@ async function reiniciar() {
   return true;
 }
 
+async function reiniciarTodo() {
+  estado = estadoVacio();
+  await guardar('reinicio total');
+  return true;
+}
+
 function getEstado() { return estado; }
 
 // FILA
@@ -192,6 +198,7 @@ async function liberarCajon(cajon) {
 // CARGA DE ESTADO MATUTINO
 // items: [{ cajon, ocupado, nombre, marca, placas, horaInicio, horaFin }]
 async function cargarEstadoInicial(items) {
+  // Primero actualizar cajones
   for (const item of items) {
     const cajon = String(item.cajon);
     if (!CAJONES.includes(cajon)) continue;
@@ -223,8 +230,21 @@ async function cargarEstadoInicial(items) {
     // VIP: ocupado sin timer
     estado.cargadores[cajon] = c;
   }
+
+  // Sacar de la fila a quienes ya están conectados en algún cajón
+  const nombresConectados = [];
+  for (const cajon in estado.cargadores) {
+    const c = estado.cargadores[cajon];
+    if (c.ocupado && c.usuario_actual) nombresConectados.push(c.usuario_actual.toLowerCase());
+  }
+  const filaAntes = estado.fila.length;
+  estado.fila = estado.fila.filter(function(u) {
+    return !nombresConectados.some(function(n) { return u.nombre.toLowerCase().includes(n) || n.includes(u.nombre.toLowerCase()); });
+  });
+  const sacados = filaAntes - estado.fila.length;
+
   await guardar('estado inicial cargado');
-  return true;
+  return { ok: true, sacados };
 }
 
 // PENDIENTE
@@ -295,7 +315,7 @@ function _parsearHoraHoy(horaStr) {
 }
 
 module.exports = {
-  inicializar, getEstado, guardar, reiniciar,
+  inicializar, getEstado, guardar, reiniciar, reiniciarTodo,
   agregarFila, moverAlFinal, quitarFila, primeroEnFila,
   cargadorLibre, numLibres, tiempoEstimado,
   iniciarTimerConexion, extenderTimerConexion, confirmarConexion, liberarCajon,
