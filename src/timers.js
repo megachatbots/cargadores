@@ -2,7 +2,15 @@
 const db = require('./db_cargadores');
 
 let _enviarProyectoBot = null;
+let _enviarElectricos = null;
+
 function setEnviarFn(fn) { _enviarProyectoBot = fn; }
+function setEnviarElectricosFn(fn) { _enviarElectricos = fn; }
+
+async function enviarElectricosConMencion(nombre, numero, texto) {
+  if (!_enviarElectricos) return;
+  await _enviarElectricos(nombre + ' ' + texto, numero);
+}
 
 async function enviar(texto) {
   if (_enviarProyectoBot) await _enviarProyectoBot(texto);
@@ -62,6 +70,11 @@ async function iniciarTimerSesion(cajon) {
   const c = estado.cargadores[cajon];
   if (!c) return;
   const ms = c.timer_sesion ? c.timer_sesion.duracion_ms : db.MS_SESION;
+  const MS_AVISO = 15 * 60 * 1000;
+  // Timer aviso 15 min antes (solo si la sesión dura más de 15 min)
+  if (ms > MS_AVISO) {
+    handles['aviso_' + cajon] = setTimeout(function() { avisarProximoVencimiento(cajon); }, ms - MS_AVISO);
+  }
   handles.sesion[cajon] = setTimeout(function() { notificarSesionTerminada(cajon); }, ms);
   console.log('[timers] Timer sesion iniciado — cajón ' + cajon + ', ' + (ms/3600000) + 'h');
 }
@@ -88,6 +101,22 @@ function cancelarTimerSesion(cajon) {
   if (handles.sesion[cajon]) { clearTimeout(handles.sesion[cajon]); delete handles.sesion[cajon]; }
 }
 
+async function avisarProximoVencimiento(cajon) {
+  cajon = String(cajon);
+  delete handles['aviso_' + cajon];
+  const estado = db.getEstado();
+  const c = estado.cargadores[cajon];
+  if (!c || !c.ocupado) return;
+  const nombre = c.usuario_actual;
+  const numero = c.numero_actual;
+  console.log('[timers] Aviso 15min — cajón ' + cajon + ', ' + nombre);
+  if (numero && _enviarElectricos) {
+    await enviarElectricosConMencion(nombre, numero, '@' + numero + ' faltan 15 minutos para desconectarte ⚡');
+  } else {
+    await enviar('⏰ *Aviso:* ' + nombre + ' tiene 15 minutos antes de que expire su sesión en cajón ' + cajon + '.');
+  }
+}
+
 async function notificarSesionTerminada(cajon) {
   cajon = String(cajon);
   delete handles.sesion[cajon];
@@ -95,17 +124,17 @@ async function notificarSesionTerminada(cajon) {
   const c = estado.cargadores[cajon];
   if (!c || !c.ocupado) return;
   const nombre = c.usuario_actual;
+  const numero = c.numero_actual;
   console.log('[timers] Sesion terminada — cajón ' + cajon + ', ' + nombre);
   await db.liberarCajon(cajon);
-  await enviar(
-    '🔋 *Sesión terminada*\n' +
-    nombre + ' cumplió su tiempo en cajón ' + cajon + '.\n\n' +
-    '📋 *Copiar al ayudante:*\n' +
-    'El cajón ' + cajon + ' de ' + nombre + ' está libre.'
-  );
+  if (numero && _enviarElectricos) {
+    await enviarElectricosConMencion(nombre, numero, '@' + numero + ' expiró tu tiempo de conexión, favor de desconectarte 🙏');
+  } else {
+    await enviar('🔋 *Sesión terminada*\n' + nombre + ' cumplió su tiempo en cajón ' + cajon + '.\n\n📋 *Copiar al ayudante:*\nEl cajón ' + cajon + ' de ' + nombre + ' está libre.');
+  }
   const siguiente = db.primeroEnFila();
   if (siguiente) {
-    await enviar('⚡ Hay cajón disponible. Le toca a *' + siguiente.nombre + '*.\n¿Confirmas? Responde *sí*');
+    await enviar('⚡ Cajón ' + cajon + ' libre. Le toca a *' + siguiente.nombre + '*.\n¿Confirmas? Responde *sí*');
     await db.setPendiente({ tipo: 'asignar_turno', cargador_id: cajon, nombre: siguiente.nombre, numero: siguiente.numero });
   }
 }
@@ -150,9 +179,9 @@ async function reactivarTimers() {
 }
 
 module.exports = {
-  setEnviarFn,
+  setEnviarFn, setEnviarElectricosFn,
   iniciarTimerConexion, extenderTimerConexion, cancelarTimerConexion,
   iniciarTimerSesion, cancelarTimerSesion, reactivarTimerSesionCajon,
-  preguntarConexion, notificarSesionTerminada,
+  preguntarConexion, avisarProximoVencimiento, notificarSesionTerminada,
   reactivarTimers
 };

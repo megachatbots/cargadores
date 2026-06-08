@@ -13,12 +13,14 @@ const timers = require('./src/timers');
 
 const GRUPO_ELECTRICOS   = process.env.GRUPO_ELECTRICOS    || 'Eléctricos';
 const GRUPO_PROYECTO_BOT = process.env.GRUPO_PROYECTO_BOT  || 'Proyecto Bot';
+const GRUPO_CONTROL      = process.env.GRUPO_CONTROL       || 'Control de Cargadores 🚗';
 const PORT               = parseInt(process.env.PORT || '3000');
 const ADMIN_IDS          = (process.env.ADMIN_IDS || '147699831668775,218643967254543,130795377307849')
   .split(',').map(function(s) { return s.trim(); }).filter(Boolean);
 
 let ID_ELECTRICOS   = null;
 let ID_PROYECTO_BOT = null;
+let ID_CONTROL      = null;
 let qrActual        = null;
 let conectado       = false;
 let sockRef         = null;
@@ -282,22 +284,161 @@ async function procesarElectricos(texto, numeroFrom, nombreFrom) {
   await procesarSolicitud(nombreFrom, numeroFrom);
 }
 
+// FLUJO: CONEXIÓN MANUAL [Nombre] conectó en cajón N
+async function procesarConexionManual(nombre, cajon) {
+  cajon = String(cajon);
+  // Buscar en fila
+  const candidatos = db.buscarEnFila(nombre);
+  // Coincidencia exacta
+  const exacto = candidatos.find(function(u) { return u.nombre.toLowerCase() === nombre.toLowerCase(); });
+  if (exacto) {
+    await _ejecutarConexion(cajon, exacto.nombre, exacto.numero, false);
+    return;
+  }
+  // Un solo candidato en fila
+  if (candidatos.length === 1) {
+    await _ejecutarConexion(cajon, candidatos[0].nombre, candidatos[0].numero, false);
+    return;
+  }
+  // Ambigüedad — mostrar lista
+  let msg = '❓ No encontré "' + nombre + '" exactamente. ¿A quién te refieres?\n\n';
+  candidatos.forEach(function(u, i) { msg += (i + 1) + '. ' + u.nombre + '\n'; });
+  msg += (candidatos.length + 1) + '. No está en la fila (conectado directo)\n\n';
+  msg += 'Responde con el número de la opción.';
+  await db.setPendiente({ tipo: 'desambiguar_conexion', cajon, nombre, candidatos });
+  await enviarProyectoBot(msg);
+}
+
+async function _ejecutarConexion(cajon, nombre, numero, esMañana) {
+  const horaInicio = esMañana ? _horaISO700() : null;
+  await db.conectarUsuario(cajon, nombre, numero, horaInicio);
+  await timers.cancelarTimerConexion(cajon);
+  await timers.iniciarTimerSesion(cajon);
+  const estado = db.getEstado();
+  const c = estado.cargadores[cajon];
+  const msSesion = c && c.vip ? db.MS_SESION_VIP : db.MS_SESION;
+  const finSesion = new Date(Date.now() + msSesion)
+    .toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Mexico_City' });
+  const filaActual = db.getEstado().fila;
+  let msgFila = '';
+  if (filaActual.length) {
+    msgFila = '\n\n📋 *Fila actualizada:*\n';
+    filaActual.forEach(function(u, i) {
+      const hrs = db.tiempoEstimado(i + 1);
+      msgFila += (i + 1) + '. ' + u.nombre + ' — ' + (hrs === 0 ? 'disponible ahora' : '~' + hrs + 'h') + '\n';
+    });
+  }
+  await enviarProyectoBot('✅ *' + nombre + ' conectado en cajón ' + cajon + '*\nTermina a las: ' + finSesion + msgFila);
+}
+
+function _horaISO700() {
+  const ahora = new Date();
+  const mex = new Date(ahora.toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+  mex.setHours(7, 0, 0, 0);
+  const offset = ahora.getTime() - new Date(ahora.toLocaleString('en-US', { timeZone: 'America/Mexico_City' })).getTime();
+  return new Date(mex.getTime() + offset).toISOString();
+}
+
+// FLUJO: DESCONEXIÓN MANUAL [Nombre] se desconectó
+async function procesarDesconexionManual(nombre) {
+  const c = db.buscarCajonDeUsuario(nombre);
+  if (!c) {
+    await enviarProyectoBot('⚠️ No encontré a "' + nombre + '" conectado en ningún cajón.');
+    return;
+  }
+  timers.cancelarTimerConexion(c.cajon);
+  timers.cancelarTimerSesion(c.cajon);
+  await db.liberarCajon(c.cajon);
+
+  let msg = '✅ *' + c.usuario_actual + ' desconectado* — cajón ' + c.cajon + ' libre.';
+
+  const siguiente = db.primeroEnFila();
+  if (siguiente) {
+    msg += '\n\n⚡ Le toca a *' + siguiente.nombre + '*.';
+    await db.setPendiente({ tipo: 'asignar_turno', cargador_id: c.cajon, nombre: siguiente.nombre, numero: siguiente.numero });
+    // Avisar en Eléctricos
+    if (siguiente.numero) {
+      await enviarElectricos(siguiente.nombre + ' @' + siguiente.numero + ' es tu turno, ya hay un cajón disponible 🔌', siguiente.numero);
+    }
+    msg += '\n¿Confirmas? Responde *sí*';
+  }
+  await enviarProyectoBot(msg);
+}
+
 // PROCESAR GRUPO PROYECTO BOT
 async function procesarProyectoBot(texto, numeroFrom, nombreFrom) {
   if (!ADMIN_IDS.includes(numeroFrom)) return;
 
   const tl = texto.toLowerCase().trim();
 
-  // Comandos directos sin AI
+  // Ayuda
+  if (tl === 'ayuda') {
+    await enviarProyectoBot('🔌 *Comandos disponibles*\n\n' +
+        '📋 *Gestión de cajones:*\n' +
+        '• Pegar reporte matutino → carga estado inicial\n' +
+        '• *[Nombre] conectó en cajón N* — registrar conexión\n' +
+        '• *[Nombre] se desconectó* — liberar cajón\n' +
+        '• *cargador libre* — hay cajón disponible (asigna siguiente en fila)\n' +
+        '• *[Nombre] conectó* — confirmar después de asignar turno\n' +
+        '• *[Nombre] no llegó* — perdió su turno\n' +
+        '• *esperar* — dar 15 min más\n' +
+        '• *sí* — confirmar pregunta pendiente\n\n' +
+        '📊 *Consultas:*\n' +
+        '• *fila* — ver lista de espera\n' +
+        '• *estado* — ver cajones y fila\n' +
+        '• *quitar a [Nombre]* — sacar de la fila\n\n' +
+        '⚠️ *Emergencia:*\n' +
+        '• *reiniciar estado* — borrar todo y empezar de cero');
+    return;
+  }
+
+  // Reiniciar
   if (tl === 'reiniciar estado') {
+    const estadoActual = db.getEstado();
+    for (const cajon in estadoActual.cargadores) {
+      timers.cancelarTimerConexion(cajon);
+      timers.cancelarTimerSesion(cajon);
+    }
     await db.reiniciar();
     await enviarProyectoBot('🔄 Estado reiniciado. Todos los cajones libres y fila vacía.');
     return;
   }
 
-  // Detectar reporte matutino pegado por el admin
+  // Respuesta a desambiguación pendiente (número 1, 2, 3...)
+  const pendiente = db.getPendiente();
+  if (pendiente && pendiente.tipo === 'desambiguar_conexion' && /^\d+$/.test(tl)) {
+    const opcion = parseInt(tl);
+    const candidatos = pendiente.candidatos || [];
+    await db.setPendiente(null);
+    if (opcion === candidatos.length + 1) {
+      // No está en la fila — conectar sin número
+      await _ejecutarConexion(pendiente.cajon, pendiente.nombre, null, false);
+    } else if (opcion >= 1 && opcion <= candidatos.length) {
+      const elegido = candidatos[opcion - 1];
+      await _ejecutarConexion(pendiente.cajon, elegido.nombre, elegido.numero, false);
+    } else {
+      await enviarProyectoBot('❌ Opción inválida.');
+    }
+    return;
+  }
+
+  // Reporte matutino
   if (motor.esReporteMatutino(texto)) {
     await procesarEstadoInicial(texto);
+    return;
+  }
+
+  // Detectar "[Nombre] conectó en cajón N" antes de llamar AI
+  const mConectoEn = texto.match(/^(.+?)\s+conect[oó]\s+en\s+caj[oó]n\s+(\d+)/i);
+  if (mConectoEn) {
+    await procesarConexionManual(mConectoEn[1].trim(), mConectoEn[2]);
+    return;
+  }
+
+  // Detectar "[Nombre] se desconectó" antes de llamar AI
+  const mDesconecto = texto.match(/^(.+?)\s+se\s+desconect[oó]/i);
+  if (mDesconecto) {
+    await procesarDesconexionManual(mDesconecto[1].trim());
     return;
   }
 
@@ -325,6 +466,30 @@ async function procesarProyectoBot(texto, numeroFrom, nombreFrom) {
       break;
     }
     default: break;
+  }
+}
+
+// PROCESAR GRUPO CONTROL DE CARGADORES
+async function procesarControl(texto, numeroFrom, nombreFrom) {
+  if (!ADMIN_IDS.includes(numeroFrom)) return;
+  const tl = texto.toLowerCase().trim();
+  if (tl === 'ayuda') {
+    await enviar(ID_CONTROL, '🔌 *Comandos disponibles*\n\n' +
+        '📋 *Gestión de cajones:*\n' +
+        '• Pegar reporte matutino → carga estado inicial\n' +
+        '• *[Nombre] conectó en cajón N* — registrar conexión\n' +
+        '• *[Nombre] se desconectó* — liberar cajón\n' +
+        '• *cargador libre* — hay cajón disponible (asigna siguiente en fila)\n' +
+        '• *[Nombre] conectó* — confirmar después de asignar turno\n' +
+        '• *[Nombre] no llegó* — perdió su turno\n' +
+        '• *esperar* — dar 15 min más\n' +
+        '• *sí* — confirmar pregunta pendiente\n\n' +
+        '📊 *Consultas:*\n' +
+        '• *fila* — ver lista de espera\n' +
+        '• *estado* — ver cajones y fila\n' +
+        '• *quitar a [Nombre]* — sacar de la fila\n\n' +
+        '⚠️ *Emergencia:*\n' +
+        '• *reiniciar estado* — borrar todo y empezar de cero');
   }
 }
 
@@ -361,6 +526,7 @@ async function iniciarBot() {
   const sock = makeWASocket({ version: waVersion, auth: state, logger: pino({ level: 'silent' }), browser: ['Mac OS', 'Safari', '10.15.7'] });
   sockRef = sock;
   timers.setEnviarFn(enviarProyectoBot);
+  timers.setEnviarElectricosFn(enviarElectricos);
 
   sock.ev.on('connection.update', async function(u) {
     const { connection, lastDisconnect, qr } = u;
@@ -395,6 +561,7 @@ async function iniciarBot() {
         if (esGrupo) {
           if      (chat === ID_ELECTRICOS)   await procesarElectricos(texto, numeroFrom, nombreFrom);
           else if (chat === ID_PROYECTO_BOT) await procesarProyectoBot(texto, numeroFrom, nombreFrom);
+          else if (chat === ID_CONTROL)       await procesarControl(texto, numeroFrom, nombreFrom);
         } else {
           await procesarPrivado(chat, texto, numeroFrom);
         }
@@ -412,6 +579,7 @@ async function detectarGrupos(sock) {
       const info = grupos[id];
       if (info.subject === GRUPO_ELECTRICOS)   { ID_ELECTRICOS   = id; console.log('Grupo Eléctricos → ' + id); }
       if (info.subject === GRUPO_PROYECTO_BOT) { ID_PROYECTO_BOT = id; console.log('Grupo Proyecto Bot → ' + id); }
+      if (info.subject === GRUPO_CONTROL)      { ID_CONTROL      = id; console.log('Grupo Control → ' + id); }
     }
     if (!ID_ELECTRICOS)   console.log('Grupo "' + GRUPO_ELECTRICOS + '" no encontrado');
     if (!ID_PROYECTO_BOT) console.log('Grupo "' + GRUPO_PROYECTO_BOT + '" no encontrado');

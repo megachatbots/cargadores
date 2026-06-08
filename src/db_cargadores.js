@@ -195,6 +195,61 @@ async function liberarCajon(cajon) {
   return { cajon, nombre };
 }
 
+// Conectar usuario manualmente (comando admin)
+// numero puede ser null si no está en la fila
+async function conectarUsuario(cajon, nombre, numero, horaInicio) {
+  cajon = String(cajon);
+  const c = estado.cargadores[cajon];
+  if (!c) return null;
+  const msSesion = c.vip ? MS_SESION_VIP : MS_SESION;
+  // Usar horaInicio si viene (matutino), si no usar ahora
+  const inicio = horaInicio ? horaInicio : new Date().toISOString();
+  c.ocupado        = true;
+  c.usuario_actual = nombre;
+  c.numero_actual  = numero || null;
+  c.hora_inicio    = inicio;
+  c.timer_conexion = { activo: false, hora_inicio: null, duracion_ms: MS_CONEXION, extensiones: 0 };
+  c.timer_sesion   = { activo: true, hora_inicio: inicio, duracion_ms: msSesion };
+  // Sacar de la fila si está
+  if (numero) {
+    estado.fila = estado.fila.filter(function(u) { return u.numero !== numero; });
+  } else {
+    // Sacar por nombre si no hay número
+    estado.fila = estado.fila.filter(function(u) {
+      return !u.nombre.toLowerCase().includes(nombre.toLowerCase()) &&
+             !nombre.toLowerCase().includes(u.nombre.toLowerCase());
+    });
+  }
+  await guardar('conectar ' + nombre + ' en ' + cajon);
+  return c;
+}
+
+// Buscar cajón ocupado por nombre (búsqueda flexible)
+function buscarCajonDeUsuario(nombre) {
+  const nl = nombre.toLowerCase();
+  for (const cajon of CAJONES) {
+    const c = estado.cargadores[cajon];
+    if (c.ocupado && c.usuario_actual) {
+      const ul = c.usuario_actual.toLowerCase();
+      if (ul === nl || ul.includes(nl) || nl.includes(ul)) return c;
+    }
+    if (c.timer_conexion && c.timer_conexion.activo && c.usuario_actual) {
+      const ul = c.usuario_actual.toLowerCase();
+      if (ul === nl || ul.includes(nl) || nl.includes(ul)) return c;
+    }
+  }
+  return null;
+}
+
+// Buscar candidatos en fila por nombre (para desambiguación)
+function buscarEnFila(nombre) {
+  const nl = nombre.toLowerCase();
+  return estado.fila.filter(function(u) {
+    const ul = u.nombre.toLowerCase();
+    return ul.includes(nl) || nl.includes(ul);
+  });
+}
+
 // CARGA DE ESTADO MATUTINO
 // items: [{ cajon, ocupado, nombre, marca, placas, horaInicio, horaFin }]
 async function cargarEstadoInicial(items) {
@@ -319,6 +374,7 @@ module.exports = {
   agregarFila, moverAlFinal, quitarFila, primeroEnFila,
   cargadorLibre, numLibres, tiempoEstimado,
   iniciarTimerConexion, extenderTimerConexion, confirmarConexion, liberarCajon,
+  conectarUsuario, buscarCajonDeUsuario, buscarEnFila,
   cargarEstadoInicial,
   setPendiente, getPendiente,
   resumenFila, resumenCargadores, resumenCompleto,
