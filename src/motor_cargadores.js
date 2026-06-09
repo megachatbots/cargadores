@@ -38,7 +38,7 @@ function prefiltroCargador(texto) {
   const tl = texto.toLowerCase();
   const negativo = /^(ok|gracias|de acuerdo|claro|perfecto|bajo|listo|conectad|desconectad|libero|libera|liberand|bajando|voy)/i.test(tl.trim());
   if (negativo) return false;
-  return /cargar|turno|lugar|fila|anot|apunt|anex|agrega|cargador|espera|quiero|necesito|disponib|hay lugar|también|tambi[eé]n/i.test(tl);
+  return /cargar|turno|lugar|fila|anot|apunt|anex|agrega|cargador|espera|quiero|necesito|disponib|hay lugar|también|tambi[eé]n|considerar|lista/i.test(tl);
 }
 
 // DETECTAR SOLICITUD (AI)
@@ -105,7 +105,8 @@ function parsearReporteMatutino(texto) {
       .replace(/\s+antes de.*/i,'')
       .trim();
 
-    const horaInicio = mHora ? mHora[1] : null;
+    // Si no hay rango de horas, asumir que conectó antes de las 7:00
+    const horaInicio = mHora ? mHora[1] : '7:00';
     const horaFin    = mHora ? mHora[2].replace('-',':') : null;
     const marca      = lineas[2] || null;
     const placas     = lineas[3] || null;

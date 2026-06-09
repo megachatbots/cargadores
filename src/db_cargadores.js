@@ -61,7 +61,7 @@ function cajonVacio(cajon) {
 function estadoVacio() {
   const cargadores = {};
   for (const c of CAJONES) cargadores[c] = cajonVacio(c);
-  return { fila: [], cargadores, proximoId: 1, pendiente: null };
+  return { fila: [], lista_estatica: [], cargadores, proximoId: 1, pendiente: null };
 }
 
 // INICIALIZACIÓN
@@ -71,6 +71,7 @@ async function inicializar() {
   if (guardado) {
     estado = guardado;
     if (estado.pendiente === undefined) estado.pendiente = null;
+    if (!estado.lista_estatica) estado.lista_estatica = [];
     // Migración: si los cargadores son array viejo (1-6), reiniciar
     if (Array.isArray(estado.cargadores)) {
       console.log('[DB_C] Migrando estado antiguo a cajones reales');
@@ -110,7 +111,27 @@ async function agregarFila(numero, nombre) {
   if (yaEsta) return { ok: false, yaEsta: true, posicion: estado.fila.indexOf(yaEsta) + 1 };
   const item = { id: estado.proximoId++, numero, nombre: nombre || numero, hora_solicitud: new Date().toISOString() };
   estado.fila.push(item);
+  // Registrar en lista estática (no se modifica después)
+  if (!estado.lista_estatica) estado.lista_estatica = [];
+  const yaEnEstatica = estado.lista_estatica.find(function(u) { return u.numero === numero; });
+  if (!yaEnEstatica) {
+    estado.lista_estatica.push({ nombre: item.nombre, numero, hora_solicitud: item.hora_solicitud });
+  }
   await guardar('agregar fila');
+  return { ok: true, posicion: estado.fila.length, item };
+}
+
+// Agregar manualmente a la fila (admin) — sin número de teléfono
+async function anotarManual(nombre) {
+  const yaEsta = estado.fila.find(function(u) { return u.nombre.toLowerCase() === nombre.toLowerCase(); });
+  if (yaEsta) return { ok: false, yaEsta: true, posicion: estado.fila.indexOf(yaEsta) + 1 };
+  const id = 'manual_' + (estado.proximoId++);
+  const hora = new Date().toISOString();
+  const item = { id, numero: id, nombre, hora_solicitud: hora, manual: true };
+  estado.fila.push(item);
+  if (!estado.lista_estatica) estado.lista_estatica = [];
+  estado.lista_estatica.push({ nombre, numero: id, hora_solicitud: hora });
+  await guardar('anotar manual ' + nombre);
   return { ok: true, posicion: estado.fila.length, item };
 }
 
@@ -224,6 +245,30 @@ async function conectarUsuario(cajon, nombre, numero, horaInicio) {
   return c;
 }
 
+// Distancia de edición simplificada (para tolerancia de errores)
+function _similitud(a, b) {
+  a = a.toLowerCase(); b = b.toLowerCase();
+  if (a === b) return 1;
+  if (a.includes(b) || b.includes(a)) return 0.9;
+  // Contar caracteres en común
+  const setA = new Set(a.split(''));
+  const setB = new Set(b.split(''));
+  let comunes = 0;
+  setA.forEach(function(c) { if (setB.has(c)) comunes++; });
+  return comunes / Math.max(setA.size, setB.size);
+}
+
+// Buscar en fila con tolerancia a errores
+function buscarEnFilaTolerate(nombre) {
+  const nl = nombre.toLowerCase();
+  return estado.fila.filter(function(u) {
+    const ul = u.nombre.toLowerCase();
+    return ul.includes(nl) || nl.includes(ul) || _similitud(nl, ul) > 0.7;
+  }).sort(function(a, b) {
+    return _similitud(b.nombre.toLowerCase(), nl) - _similitud(a.nombre.toLowerCase(), nl);
+  });
+}
+
 // Buscar cajón ocupado por nombre (búsqueda flexible)
 function buscarCajonDeUsuario(nombre) {
   const nl = nombre.toLowerCase();
@@ -243,11 +288,7 @@ function buscarCajonDeUsuario(nombre) {
 
 // Buscar candidatos en fila por nombre (para desambiguación)
 function buscarEnFila(nombre) {
-  const nl = nombre.toLowerCase();
-  return estado.fila.filter(function(u) {
-    const ul = u.nombre.toLowerCase();
-    return ul.includes(nl) || nl.includes(ul);
-  });
+  return buscarEnFilaTolerate(nombre);
 }
 
 // CARGA DE ESTADO MATUTINO
@@ -268,18 +309,21 @@ async function cargarEstadoInicial(items) {
     c.placas         = item.placas || null;
 
     // Calcular timer de sesión desde hora de inicio
-    if (item.horaInicio && !c.vip) {
+    if (!c.vip) {
       const msSesion = MS_SESION;
-      const inicio   = _parsearHoraHoy(item.horaInicio);
+      // Usar hora del reporte o asumir 7:00 si no hay
+      const horaStr = item.horaInicio || '7:00';
+      const inicio  = _parsearHoraHoy(horaStr);
       if (inicio) {
-        c.hora_inicio  = inicio.toISOString();
-        const finMs    = inicio.getTime() + msSesion;
-        const ahoraMs  = Date.now();
+        c.hora_inicio = inicio.toISOString();
+        const finMs   = inicio.getTime() + msSesion;
+        const ahoraMs = Date.now();
         if (finMs > ahoraMs) {
-          // Timer aún activo
           c.timer_sesion = { activo: true, hora_inicio: inicio.toISOString(), duracion_ms: msSesion };
+        } else {
+          // Ya venció — marcar ocupado sin timer, bot avisará en Proyecto Bot
+          c.timer_sesion = { activo: false, hora_inicio: inicio.toISOString(), duracion_ms: msSesion };
         }
-        // Si ya venció, registrar como ocupado sin timer (admin decide)
       }
     }
     // VIP: ocupado sin timer
@@ -350,6 +394,20 @@ function resumenCargadores() {
 
 function resumenCompleto() { return resumenCargadores() + '\n\n' + resumenFila(); }
 
+function resumenListaEstatica() {
+  if (!estado.lista_estatica || !estado.lista_estatica.length) {
+    return '📋 *Lista estática*\n\nNo hay registros de hoy todavía.';
+  }
+  let txt = '📋 *Lista estática — orden de llegada*\n\n';
+  estado.lista_estatica.forEach(function(u, i) {
+    const hora = new Date(u.hora_solicitud).toLocaleTimeString('es-MX', {
+      hour: '2-digit', minute: '2-digit', timeZone: 'America/Mexico_City'
+    });
+    txt += (i + 1) + '. ' + u.nombre + ' — ' + hora + '\n';
+  });
+  return txt;
+}
+
 // UTILS
 function _horaLocal(iso) {
   if (!iso) return '?';
@@ -377,6 +435,7 @@ module.exports = {
   conectarUsuario, buscarCajonDeUsuario, buscarEnFila,
   cargarEstadoInicial,
   setPendiente, getPendiente,
-  resumenFila, resumenCargadores, resumenCompleto,
+  resumenFila, resumenCargadores, resumenCompleto, resumenListaEstatica,
+  anotarManual, buscarEnFilaTolerate,
   MS_CONEXION, MS_SESION, MS_SESION_VIP, CAJONES, CAJONES_VIP
 };

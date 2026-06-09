@@ -106,9 +106,7 @@ async function procesarSolicitud(nombreFrom, numeroFrom) {
     '➕ *' + nombreFrom + '* se añadió a la fila\n' +
     '📍 Posición: ' + pos + ' | Fila total: ' + db.getEstado().fila.length + '\n' +
     '⏱ ' + espera + '\n\n' +
-    '📋 *Copiar a "Eléctricos":*\n' +
-    nombreFrom + ', quedaste anotado en posición ' + pos + '. ' +
-    (hrs === 0 ? 'Hay cargador disponible.' : 'Tiempo estimado: ~' + hrs + 'h.');
+    '';
 
   if (libre && pos === 1) {
     msgAdmin += '\n\n⚡ Hay cargador disponible ahora. ¿Asigno turno? Responde *sí*';
@@ -422,6 +420,27 @@ async function procesarProyectoBot(texto, numeroFrom, nombreFrom) {
     return;
   }
 
+  // Quitar por número de posición: "quitar 3"
+  const mQuitar = tl.match(/^quitar\s+(\d+)$/);
+  if (mQuitar) {
+    const pos = parseInt(mQuitar[1]) - 1;
+    const fila = db.getEstado().fila;
+    if (pos < 0 || pos >= fila.length) {
+      await enviarProyectoBot('❌ Posición ' + (pos+1) + ' no existe. La fila tiene ' + fila.length + ' personas.');
+    } else {
+      const u = fila[pos];
+      await db.quitarFila(u.numero);
+      await enviarProyectoBot('✅ ' + u.nombre + ' quitado de la fila (era posición ' + (pos+1) + ')');
+    }
+    return;
+  }
+
+  // Lista estática directo
+  if (tl === 'lista estatica' || tl === 'lista estática') {
+    await enviarProyectoBot(db.resumenListaEstatica());
+    return;
+  }
+
   // Reporte matutino
   if (motor.esReporteMatutino(texto)) {
     await procesarEstadoInicial(texto);
@@ -454,8 +473,24 @@ async function procesarProyectoBot(texto, numeroFrom, nombreFrom) {
     case 'usuario_perdio':   await procesarUsuarioPerdio(r.nombre || ''); break;
     case 'esperar':          await procesarEsperar(); break;
     case 'confirmar':        await procesarConfirmar(); break;
-    case 'ver_fila':         await enviarProyectoBot(db.resumenFila()); break;
+    case 'ver_fila': {
+      let msgFila = db.resumenFila();
+      if (db.getEstado().fila.length) msgFila += '\n\nPara quitar escribe: *quitar [número]*';
+      await enviarProyectoBot(msgFila);
+      break;
+    }
     case 'ver_estado':       await enviarProyectoBot(db.resumenCompleto()); break;
+    case 'lista_estatica':   await enviarProyectoBot(db.resumenListaEstatica()); break;
+    case 'anotar_usuario': {
+      if (!r.nombre) { await enviarProyectoBot('❌ Indica el nombre. Ej: "anotar a Juan"'); return; }
+      const resAnotar = await db.anotarManual(r.nombre);
+      if (resAnotar.yaEsta) {
+        await enviarProyectoBot('ℹ️ ' + r.nombre + ' ya está en la fila (posición ' + resAnotar.posicion + ')');
+      } else {
+        await enviarProyectoBot('✅ *' + r.nombre + '* anotado en posición ' + resAnotar.posicion);
+      }
+      break;
+    }
     case 'quitar_usuario': {
       if (!r.nombre) { await enviarProyectoBot('❌ Indica el nombre. Ej: "quitar a Juan"'); return; }
       const est = db.getEstado();

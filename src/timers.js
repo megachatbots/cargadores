@@ -88,9 +88,14 @@ async function reactivarTimerSesionCajon(cajon) {
   if (!c || !c.timer_sesion || !c.timer_sesion.activo) return;
   const transcurrido = Date.now() - new Date(c.timer_sesion.hora_inicio).getTime();
   const restante = c.timer_sesion.duracion_ms - transcurrido;
+  const MS_AVISO = 15 * 60 * 1000;
   if (restante <= 0) {
     setTimeout(function() { notificarSesionTerminada(cajon); }, 1000);
   } else {
+    // Reactivar aviso 15min si aún queda tiempo
+    if (restante > MS_AVISO) {
+      handles['aviso_' + cajon] = setTimeout(function() { avisarProximoVencimiento(cajon); }, restante - MS_AVISO);
+    }
     handles.sesion[cajon] = setTimeout(function() { notificarSesionTerminada(cajon); }, restante);
     console.log('[timers] Timer sesion reactivado — cajón ' + cajon + ', ' + Math.round(restante/60000) + 'min restantes');
   }
