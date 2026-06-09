@@ -321,8 +321,8 @@ async function cargarEstadoInicial(items) {
         if (finMs > ahoraMs) {
           c.timer_sesion = { activo: true, hora_inicio: inicio.toISOString(), duracion_ms: msSesion };
         } else {
-          // Ya venció — marcar ocupado sin timer, bot avisará en Proyecto Bot
-          c.timer_sesion = { activo: false, hora_inicio: inicio.toISOString(), duracion_ms: msSesion };
+          // Ya venció — guardar hora para mostrar en resumen pero marcar inactivo
+          c.timer_sesion = { activo: false, hora_inicio: inicio.toISOString(), duracion_ms: msSesion, vencido: true };
         }
       }
     }
@@ -375,8 +375,11 @@ function resumenCargadores() {
     const vipTag = c.vip ? ' ⭐' : '';
     if (c.ocupado) {
       let fin = '?';
-      if (c.timer_sesion && c.timer_sesion.activo) {
+      // Mostrar hora de fin aunque el timer ya haya vencido
+      if (c.timer_sesion && c.timer_sesion.hora_inicio) {
         fin = _horaLocal(new Date(new Date(c.timer_sesion.hora_inicio).getTime() + c.timer_sesion.duracion_ms).toISOString());
+      } else if (c.hora_inicio) {
+        fin = _horaLocal(new Date(new Date(c.hora_inicio).getTime() + MS_SESION).toISOString());
       }
       txt += '🔴 Cajón ' + cajon + vipTag + ': ' + c.usuario_actual + ' hasta ' + fin;
       if (c.placas) txt += ' (' + c.placas + ')';

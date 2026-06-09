@@ -263,13 +263,22 @@ async function procesarEstadoInicial(texto) {
   resumen += '\n' + db.resumenCargadores();
   await enviarProyectoBot(resumen);
 
-  // Reactivar timers para los cajones con sesión activa
+  // Reactivar timers y notificar vencidos
   const estado = db.getEstado();
+  const vencidos = [];
   for (const cajon in estado.cargadores) {
     const c = estado.cargadores[cajon];
     if (c.timer_sesion && c.timer_sesion.activo) {
       await timers.reactivarTimerSesionCajon(cajon);
+    } else if (c.timer_sesion && c.timer_sesion.vencido) {
+      vencidos.push('Cajón ' + cajon + ': ' + c.usuario_actual);
     }
+  }
+  if (vencidos.length) {
+    await enviarProyectoBot(
+      '⚠️ *Sesiones ya vencidas al cargar el estado:*\n' +
+      vencidos.join('\n') + '\n\nEscribe *[Nombre] se desconectó* para liberar cada cajón.'
+    );
   }
 }
 
