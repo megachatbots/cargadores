@@ -456,6 +456,19 @@ async function procesarProyectoBot(texto, numeroFrom, nombreFrom) {
     return;
   }
 
+  // Anotar manual: "anotar a Juan" / "agregar a María"
+  const mAnotar = texto.match(/^(?:anotar|agregar|apuntar)\s+(?:a\s+)?(.+)$/i);
+  if (mAnotar) {
+    const nombre = mAnotar[1].trim();
+    const resAnotar = await db.anotarManual(nombre);
+    if (resAnotar.yaEsta) {
+      await enviarProyectoBot('ℹ️ ' + nombre + ' ya está en la fila (posición ' + resAnotar.posicion + ')');
+    } else {
+      await enviarProyectoBot('✅ *' + nombre + '* anotado en posición ' + resAnotar.posicion);
+    }
+    return;
+  }
+
   // Detectar "[Nombre] conectó en cajón N" antes de llamar AI
   const mConectoEn = texto.match(/^(.+?)\s+conect[oó]\s+en\s+caj[oó]n\s+(\d+)/i);
   if (mConectoEn) {
@@ -515,26 +528,101 @@ async function procesarProyectoBot(texto, numeroFrom, nombreFrom) {
 
 // PROCESAR GRUPO CONTROL DE CARGADORES
 async function procesarControl(texto, numeroFrom, nombreFrom) {
-  if (!ADMIN_IDS.includes(numeroFrom)) return;
+  // El ayudante puede ser cualquiera en el grupo — no restringimos por ADMIN_IDS
+  // Solo ignoramos mensajes del propio bot
   const tl = texto.toLowerCase().trim();
-  if (tl === 'ayuda') {
-    await enviar(ID_CONTROL, '🔌 *Comandos disponibles*\n\n' +
-        '📋 *Gestión de cajones:*\n' +
-        '• Pegar reporte matutino → carga estado inicial\n' +
-        '• *[Nombre] conectó en cajón N* — registrar conexión\n' +
-        '• *[Nombre] se desconectó* — liberar cajón\n' +
-        '• *cargador libre* — hay cajón disponible (asigna siguiente en fila)\n' +
-        '• *[Nombre] conectó* — confirmar después de asignar turno\n' +
-        '• *[Nombre] no llegó* — perdió su turno\n' +
-        '• *esperar* — dar 15 min más\n' +
-        '• *sí* — confirmar pregunta pendiente\n\n' +
-        '📊 *Consultas:*\n' +
-        '• *fila* — ver lista de espera\n' +
-        '• *estado* — ver cajones y fila\n' +
-        '• *quitar a [Nombre]* — sacar de la fila\n\n' +
-        '⚠️ *Emergencia:*\n' +
-        '• *reiniciar estado* — borrar todo y empezar de cero');
+
+  // Ayuda — solo para admins
+  if (tl === 'ayuda' && ADMIN_IDS.includes(numeroFrom)) {
+    await enviar(ID_CONTROL,
+      '🔌 *Comandos del ayudante*\n\n' +
+      '• Pegar reporte matutino → el bot carga el estado\n' +
+      '• *Cajón N\nNombre HH:MM-HH:MM\nMarca\nPlacas* → conexión\n' +
+      '• *N libre* o *N libre Nombre* → desconexión'
+    );
+    return;
   }
+
+  // Reporte matutino — bloque con múltiples cajones
+  if (motor.esReporteMatutino(texto)) {
+    await procesarEstadoInicial(texto);
+    return;
+  }
+
+  // Conexión: "Cajón 44\nNombre HH:MM-HH:MM\nMarca\nPlacas"
+  const rConexion = motor.parsearAyudanteConexion(texto);
+  if (rConexion) {
+    await procesarConexionAyudante(rConexion);
+    return;
+  }
+
+  // Desconexión: "44 libre" / "44 libre Tania" / "Cajón 44 libre"
+  const rLibre = motor.parsearAyudanteLibre(texto);
+  if (rLibre) {
+    await procesarDesconexionAyudante(rLibre.cajon);
+    return;
+  }
+}
+
+// FLUJO: conexión reportada por ayudante
+async function procesarConexionAyudante(r) {
+  // Buscar en fila para obtener número
+  const candidatos = db.buscarEnFila(r.nombre);
+  const usuario = candidatos.length === 1 ? candidatos[0] : candidatos.find(function(u) {
+    return u.nombre.toLowerCase() === r.nombre.toLowerCase();
+  });
+  const numero = usuario ? usuario.numero : null;
+
+  // Calcular hora de inicio
+  const horaInicio = r.horaDesde ? _horaDesdeStr(r.horaDesde) : null;
+  await db.conectarUsuario(r.cajon, r.nombre, numero, horaInicio);
+  timers.cancelarTimerConexion(r.cajon);
+  await timers.iniciarTimerSesion(r.cajon);
+
+  // Notificar en Eléctricos si tenemos número
+  const estado = db.getEstado();
+  const c = estado.cargadores[String(r.cajon)];
+  const msSesion = c && c.vip ? db.MS_SESION_VIP : db.MS_SESION;
+  const finSesion = new Date(Date.now() + msSesion)
+    .toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Mexico_City' });
+
+  if (numero) {
+    await enviarElectricos(r.nombre + ' @' + numero + ' ✅ quedaste conectado hasta las ' + finSesion, numero);
+  }
+  console.log('[CONTROL] Conexión: ' + r.nombre + ' cajón ' + r.cajon);
+}
+
+// FLUJO: desconexión reportada por ayudante
+async function procesarDesconexionAyudante(cajon) {
+  cajon = String(cajon);
+  const estado = db.getEstado();
+  const c = estado.cargadores[cajon];
+  if (!c || !c.ocupado) return;
+
+  timers.cancelarTimerConexion(cajon);
+  timers.cancelarTimerSesion(cajon);
+  await db.liberarCajon(cajon);
+
+  // Avisar al primero de la fila en Eléctricos
+  const siguiente = db.primeroEnFila();
+  if (siguiente && siguiente.numero) {
+    await enviarElectricos(
+      siguiente.nombre + ' @' + siguiente.numero + ' ya hay un lugar disponible para conectarte 🔌',
+      siguiente.numero
+    );
+    await db.setPendiente({ tipo: 'asignar_turno', cargador_id: cajon, nombre: siguiente.nombre, numero: siguiente.numero });
+  }
+  console.log('[CONTROL] Desconexión cajón ' + cajon);
+}
+
+function _horaDesdeStr(horaStr) {
+  const m = horaStr.match(/(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const ahora = new Date();
+  const mex = new Date(ahora.toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+  mex.setHours(parseInt(m[1]), parseInt(m[2]), 0, 0);
+  const offset = ahora.getTime() - new Date(ahora.toLocaleString('en-US', { timeZone: 'America/Mexico_City' })).getTime();
+  return new Date(mex.getTime() + offset).toISOString();
 }
 
 // PROCESAR PRIVADO

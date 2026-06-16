@@ -122,4 +122,28 @@ function esReporteMatutino(texto) {
   return (texto.match(/caj[oó]n\s+\d+/gi) || []).length >= 2;
 }
 
-module.exports = { detectarSolicitud, parsearComandoAdmin, parsearReporteMatutino, esReporteMatutino, prefiltroCargador };
+// Parser conexión ayudante: "Cajón 44\nNombre HH:MM-HH:MM\nMarca\nPlacas"
+function parsearAyudanteConexion(texto) {
+  const HORA_RANGO = /(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}[:\-]\d{2})/;
+  const m = texto.match(/caj[oó]n\s+(\d+)\s*\n([^\n]+?)\s+(\d{1,2}:\d{2}[-–]\d{1,2}[:\-]\d{2})\s*\n([^\n]*)\s*\n([^\n]*)/i);
+  if (m) {
+    const horas = m[3].match(HORA_RANGO);
+    return { cajon: m[1], nombre: m[2].trim(), horaDesde: horas ? horas[1] : null, horaHasta: horas ? horas[2].replace('-',':') : null, marca: m[4].trim() || null, placas: m[5].trim() || null };
+  }
+  // Sin marca/placas
+  const m2 = texto.match(/caj[oó]n\s+(\d+)\s*\n([^\n]+?)\s+(\d{1,2}:\d{2}[-–]\d{1,2}[:\-]\d{2})/i);
+  if (m2) {
+    const horas = m2[3].match(HORA_RANGO);
+    return { cajon: m2[1], nombre: m2[2].trim(), horaDesde: horas ? horas[1] : null, horaHasta: horas ? horas[2].replace('-',':') : null, marca: null, placas: null };
+  }
+  return null;
+}
+
+// Parser desconexión ayudante: "44 libre" / "44 libre Tania" / "Cajón 44 libre"
+function parsearAyudanteLibre(texto) {
+  const m = texto.match(/(?:caj[oó]n\s+)?(\d+)\s+libre/i);
+  if (m) return { cajon: m[1] };
+  return null;
+}
+
+module.exports = { detectarSolicitud, parsearComandoAdmin, parsearReporteMatutino, esReporteMatutino, prefiltroCargador, parsearAyudanteConexion, parsearAyudanteLibre };

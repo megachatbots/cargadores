@@ -1,21 +1,23 @@
 // src/timers.js — Timers persistentes para conexión (15min) y sesión (3h/8h)
 const db = require('./db_cargadores');
 
-let _enviarProyectoBot = null;
-let _enviarElectricos = null;
+// Wrappers dinámicos — se actualizan en cada reconexión de Baileys
+const _fns = { proyectoBot: null, electricos: null };
 
-function setEnviarFn(fn) { _enviarProyectoBot = fn; }
-function setEnviarElectricosFn(fn) { _enviarElectricos = fn; }
-
-async function enviarElectricosConMencion(nombre, numero, texto) {
-  if (!_enviarElectricos) return;
-  await _enviarElectricos(nombre + ' ' + texto, numero);
-}
+function setEnviarFn(fn) { _fns.proyectoBot = fn; }
+function setEnviarElectricosFn(fn) { _fns.electricos = fn; }
 
 async function enviar(texto) {
-  if (_enviarProyectoBot) await _enviarProyectoBot(texto);
+  if (_fns.proyectoBot) await _fns.proyectoBot(texto);
   else console.log('[timers] enviar sin fn:', texto.substring(0, 60));
 }
+
+async function enviarElectricosConMencion(nombre, numero, texto) {
+  if (!_fns.electricos) { console.log('[timers] enviarElectricos sin fn'); return; }
+  await _fns.electricos(nombre + ' ' + texto, numero);
+}
+
+
 
 const handles = { conexion: {}, sesion: {} };
 
