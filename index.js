@@ -62,13 +62,20 @@ async function enviarProyectoBot(texto) {
 }
 
 async function enviarElectricos(texto, mencionNumero) {
-  if (!ID_ELECTRICOS) { console.log('[enviarElectricos] ID no disponible'); return; }
+  // Siempre leer ID_ELECTRICOS en el momento de enviar (no en el momento de crear la función)
+  if (!ID_ELECTRICOS) {
+    console.log('[enviarElectricos] ID_ELECTRICOS no disponible — redetectando');
+    if (sockRef) await detectarGrupos(sockRef);
+    if (!ID_ELECTRICOS) { console.log('[enviarElectricos] Sigue sin ID, abortando'); return; }
+  }
+  if (!sockRef) { console.log('[enviarElectricos] sockRef no disponible'); return; }
   if (mencionNumero) {
     const jid = mencionNumero.includes('@') ? mencionNumero : mencionNumero + '@s.whatsapp.net';
     try {
       await sockRef.sendMessage(ID_ELECTRICOS, { text: texto, mentions: [jid] });
+      console.log('[enviarElectricos] Enviado con mención a ' + mencionNumero);
       return;
-    } catch (e) { console.log('[enviarElectricos]', e.message); }
+    } catch (e) { console.log('[enviarElectricos] Error con mención:', e.message); }
   }
   await enviar(ID_ELECTRICOS, texto);
 }
@@ -126,13 +133,7 @@ async function procesarCargadorLibre() {
   if (!libre)     { await enviarProyectoBot('⚠️ No hay cajones libres disponibles.'); return; }
 
   await db.setPendiente({ tipo: 'asignar_turno', cargador_id: libre.cajon, nombre: siguiente.nombre, numero: siguiente.numero });
-  await enviarProyectoBot(
-    '⚡ Le toca a *' + siguiente.nombre + '*\n' +
-    'Cajón: ' + libre.cajon + '\n\n' +
-    '¿Confirmas? Responde *sí*\n\n' +
-    '📋 *Copiar a "Eléctricos":*\n' +
-    siguiente.nombre + ', es tu turno. Tienes 15 minutos para conectarte al cajón ' + libre.cajon + '.'
-  );
+  await enviarProyectoBot('⚡ Le toca a *' + siguiente.nombre + '*\n¿Confirmas? Responde *sí*');
 }
 
 // FLUJO: CONFIRMAR
@@ -145,15 +146,11 @@ async function procesarConfirmar() {
     await timers.iniciarTimerConexion(pendiente.cargador_id, pendiente.nombre, pendiente.numero);
     const finTimer = new Date(Date.now() + 15 * 60 * 1000)
       .toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Mexico_City' });
-    await enviarProyectoBot(
-      '✅ *Turno asignado a ' + pendiente.nombre + '*\n' +
-      'Cajón: ' + pendiente.cargador_id + '\n' +
-      '⏰ Tiene hasta las ' + finTimer + ' para conectarse\n\n' +
-      '📋 *Copiar a "Eléctricos":*\n' +
-      pendiente.nombre + ', es tu turno. Tienes 15 minutos para conectarte al cajón ' + pendiente.cargador_id + '.\n\n' +
-      '📋 *Copiar al ayudante:*\n' +
-      pendiente.nombre + ' va a conectar en cajón ' + pendiente.cargador_id + '.'
-    );
+    // Avisar al usuario en Eléctricos
+    if (pendiente.numero) {
+      await enviarElectricos(pendiente.nombre + ' @' + pendiente.numero + ' es tu turno, tienes 15 minutos para conectarte 🔌', pendiente.numero);
+    }
+    await enviarProyectoBot('✅ *Turno asignado a ' + pendiente.nombre + '*\n⏰ Tiene hasta las ' + finTimer + ' para conectarse');
     return;
   }
   if (pendiente.tipo === 'conexion_vencida') {
@@ -180,17 +177,7 @@ async function procesarUsuarioConecto(nombre, cajonHint) {
   const finSesion = new Date(Date.now() + msSesion)
     .toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Mexico_City' });
 
-  const filaActual = db.getEstado().fila;
-  let msgFila = '';
-  if (filaActual.length) {
-    msgFila = '\n\n📋 *Copiar a "Eléctricos" — fila actualizada:*\n';
-    filaActual.forEach(function(u, i) {
-      const hrs = db.tiempoEstimado(i + 1);
-      msgFila += (i + 1) + '. ' + u.nombre + ' — ' + (hrs === 0 ? 'disponible ahora' : '~' + hrs + 'h') + '\n';
-    });
-  }
-
-  await enviarProyectoBot('✅ *' + nombre + ' conectado*\nCajón: ' + cargador.cajon + ' | Termina a las: ' + finSesion + msgFila);
+  await enviarProyectoBot('✅ *' + nombre + ' conectado* | Termina a las: ' + finSesion);
 }
 
 // FLUJO: USUARIO PERDIÓ TURNO
@@ -208,17 +195,18 @@ async function procesarUsuarioPerdio(nombre) {
   const res = await db.moverAlFinal(numActual || nombre);
   const nuevaPos = res ? res.posicion : '?';
 
-  const siguiente = db.primeroEnFila();
-  let msg =
-    '❌ *' + nombre + ' perdió su turno*\n' +
-    'Movido al final (posición ' + nuevaPos + ')\n\n' +
-    '📋 *Copiar a "Eléctricos":*\n' +
-    nombre + ', perdiste tu turno. Quedaste en posición ' + nuevaPos + ' de la fila.';
+  // Avisar al usuario en Eléctricos si tiene número
+  const uFila = db.getEstado().fila.find(function(u) { return u.numero === numActual; });
+  if (uFila && uFila.numero) {
+    await enviarElectricos(nombre + ' @' + uFila.numero + ' perdiste tu turno. Quedaste en posición ' + nuevaPos + ' de la lista 😔', uFila.numero);
+  }
 
+  const siguiente = db.primeroEnFila();
+  let msg = '❌ *' + nombre + ' perdió su turno* — posición ' + nuevaPos;
   if (siguiente) {
     const libreAhora = db.cargadorLibre();
     if (libreAhora) {
-      msg += '\n\n⚡ Le toca ahora a *' + siguiente.nombre + '*. ¿Confirmas? Responde *sí*';
+      msg += '\n⚡ Le toca ahora a *' + siguiente.nombre + '*. ¿Confirmas? Responde *sí*';
       await db.setPendiente({ tipo: 'asignar_turno', cargador_id: libreAhora.cajon, nombre: siguiente.nombre, numero: siguiente.numero });
     }
   }
@@ -457,7 +445,7 @@ async function procesarProyectoBot(texto, numeroFrom, nombreFrom) {
   }
 
   // Anotar manual: "anotar a Juan" / "agregar a María"
-  const mAnotar = texto.match(/^(?:anotar|agregar|apuntar)\s+(?:a\s+)?(.+)$/i);
+  const mAnotar = texto.match(/^(?:anotar|agregar|apuntar|a[nñ]adir|añadir)\s+(?:a\s+)?(.+)$/i);
   if (mAnotar) {
     const nombre = mAnotar[1].trim();
     const resAnotar = await db.anotarManual(nombre);
@@ -687,8 +675,13 @@ async function iniciarBot() {
       const texto      = (msg.message.conversation || (msg.message.extendedTextMessage && msg.message.extendedTextMessage.text) || '');
       if (!texto.trim()) continue;
       const nombreFrom = msg.pushName || numeroFrom;
-      const canal      = esGrupo ? (chat === ID_ELECTRICOS ? 'ELÉCTRICOS' : chat === ID_PROYECTO_BOT ? 'PROYECTO BOT' : 'OTRO') : 'PRIV';
+      const canal      = esGrupo ? (chat === ID_ELECTRICOS ? 'ELÉCTRICOS' : chat === ID_PROYECTO_BOT ? 'PROYECTO BOT' : chat === ID_CONTROL ? 'CONTROL' : 'OTRO') : 'PRIV';
       console.log('[MSG][' + canal + '] ' + nombreFrom + ': ' + texto.substring(0, 60));
+      // Si llega mensaje de grupo no reconocido, intentar redetectar grupos
+      if (esGrupo && chat !== ID_ELECTRICOS && chat !== ID_PROYECTO_BOT && chat !== ID_CONTROL) {
+        console.log('[MSG] Grupo desconocido ' + chat + ' — redetectando...');
+        await detectarGrupos(sockRef);
+      }
       try {
         if (esGrupo) {
           if      (chat === ID_ELECTRICOS)   await procesarElectricos(texto, numeroFrom, nombreFrom);

@@ -139,7 +139,19 @@ async function notificarSesionTerminada(cajon) {
   } else {
     await enviar('🔋 *Sesión terminada*\n' + nombre + ' cumplió su tiempo en cajón ' + cajon + '.\n\n📋 *Copiar al ayudante:*\nEl cajón ' + cajon + ' de ' + nombre + ' está libre.');
   }
-  const siguiente = db.primeroEnFila();
+  const est2 = db.getEstado();
+  // Contar cuántos usuarios ya tienen turno activo (timer_conexion activo)
+  const conTurnoActivo = new Set();
+  for (const c in est2.cargadores) {
+    const carg = est2.cargadores[c];
+    if (carg.timer_conexion && carg.timer_conexion.activo && carg.usuario_actual) {
+      conTurnoActivo.add(carg.usuario_actual.toLowerCase());
+    }
+  }
+  // Buscar el primero de la fila que NO tenga turno activo ya
+  const siguiente = est2.fila.find(function(u) {
+    return !conTurnoActivo.has(u.nombre.toLowerCase());
+  });
   if (siguiente) {
     await enviar('⚡ Cajón ' + cajon + ' libre. Le toca a *' + siguiente.nombre + '*.\n¿Confirmas? Responde *sí*');
     await db.setPendiente({ tipo: 'asignar_turno', cargador_id: cajon, nombre: siguiente.nombre, numero: siguiente.numero });
