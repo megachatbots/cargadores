@@ -21,6 +21,9 @@ const ADMIN_IDS          = (process.env.ADMIN_IDS || '147699831668775,2186439672
 let ID_ELECTRICOS   = null;
 let ID_PROYECTO_BOT = null;
 let ID_CONTROL      = null;
+
+// Recordatorios de desconexión activos: { nombre -> intervalHandle }
+const recordatoriosDesconexion = {};
 let qrActual        = null;
 let conectado       = false;
 let sockRef         = null;
@@ -550,6 +553,72 @@ async function procesarControl(texto, numeroFrom, nombreFrom) {
     await procesarDesconexionAyudante(rLibre.cajon);
     return;
   }
+
+  // Recordatorio de desconexión: "se tiene que desconectar [Nombre]"
+  const mRecordatorio = texto.match(/se\s+tiene\s+que\s+desconect(?:ar|er)\s+(.+)/i) ||
+                        texto.match(/desconectar\s+(.+)/i) ||
+                        texto.match(/pedir\s+(?:a\s+)?(.+?)\s+que\s+se\s+desconect/i);
+  if (mRecordatorio) {
+    const nombreBuscado = mRecordatorio[1].trim();
+    // Buscar en cajones ocupados
+    const estado = db.getEstado();
+    let encontrado = null;
+    for (const cajon in estado.cargadores) {
+      const c = estado.cargadores[cajon];
+      if (c.ocupado && c.usuario_actual) {
+        const ul = c.usuario_actual.toLowerCase();
+        const nl = nombreBuscado.toLowerCase();
+        if (ul.includes(nl) || nl.includes(ul)) { encontrado = c; break; }
+      }
+    }
+    const numero = encontrado ? encontrado.numero_actual : null;
+    const nombre = encontrado ? encontrado.usuario_actual : nombreBuscado;
+    await iniciarRecordatorioDesconexion(nombre, numero);
+    return;
+  }
+}
+
+// FLUJO: recordatorio de desconexión
+async function iniciarRecordatorioDesconexion(nombre, numero) {
+  // Cancelar si ya hay uno activo para este usuario
+  if (recordatoriosDesconexion[nombre]) {
+    clearInterval(recordatoriosDesconexion[nombre]);
+    delete recordatoriosDesconexion[nombre];
+  }
+
+  async function enviarRecordatorio() {
+    const estado = db.getEstado();
+    // Verificar si el usuario sigue conectado
+    const sigueConectado = Object.values(estado.cargadores).some(function(c) {
+      return c.ocupado && c.usuario_actual &&
+        c.usuario_actual.toLowerCase().includes(nombre.toLowerCase());
+    });
+    if (!sigueConectado) {
+      // Ya se desconectó — cancelar recordatorios
+      clearInterval(recordatoriosDesconexion[nombre]);
+      delete recordatoriosDesconexion[nombre];
+      return;
+    }
+    if (numero) {
+      await enviarElectricos(nombre + ' @' + numero + ' por favor desconecta tu vehículo, el tiempo de carga ha terminado 🙏', numero);
+    } else {
+      await enviarElectricos(nombre + ' por favor desconecta tu vehículo, el tiempo de carga ha terminado 🙏', null);
+    }
+  }
+
+  // Enviar mensaje inmediatamente
+  await enviarRecordatorio();
+  // Repetir cada 15 minutos
+  recordatoriosDesconexion[nombre] = setInterval(enviarRecordatorio, 15 * 60 * 1000);
+  console.log('[recordatorio] Iniciado para ' + nombre + ' cada 15min');
+}
+
+function cancelarRecordatorioDesconexion(nombre) {
+  if (recordatoriosDesconexion[nombre]) {
+    clearInterval(recordatoriosDesconexion[nombre]);
+    delete recordatoriosDesconexion[nombre];
+    console.log('[recordatorio] Cancelado para ' + nombre);
+  }
 }
 
 // FLUJO: conexión reportada por ayudante
@@ -586,6 +655,9 @@ async function procesarDesconexionAyudante(cajon) {
   const estado = db.getEstado();
   const c = estado.cargadores[cajon];
   if (!c || !c.ocupado) return;
+
+  // Cancelar recordatorio de desconexión si había uno activo
+  if (c.usuario_actual) cancelarRecordatorioDesconexion(c.usuario_actual);
 
   timers.cancelarTimerConexion(cajon);
   timers.cancelarTimerSesion(cajon);
