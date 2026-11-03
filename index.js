@@ -11,6 +11,12 @@ const db    = require('./src/db_cargadores');
 const motor = require('./src/motor_cargadores');
 const timers = require('./src/timers');
 const tiempo = require('./src/tiempo');
+const control = require('./src/control').crear({
+  db: db, timers: timers, tiempo: tiempo,
+  enviarElectricos: function(t, m) { return enviarElectricos(t, m); },
+  enviarProyectoBot: function(t) { return enviarProyectoBot(t); },
+  procesarReporte: function(t) { return procesarEstadoInicial(t); }
+});
 
 const GRUPO_ELECTRICOS   = process.env.GRUPO_ELECTRICOS    || 'Eléctricos';
 const GRUPO_PROYECTO_BOT = process.env.GRUPO_PROYECTO_BOT  || 'Proyecto Bot';
@@ -24,13 +30,12 @@ let ID_PROYECTO_BOT = null;
 let ID_CONTROL      = null;
 
 // Recordatorios de desconexión activos: { nombre -> intervalHandle }
-const recordatoriosDesconexion = {};
 let qrActual        = null;
 let conectado       = false;
 let sockRef         = null;
 let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion;
 
-const VERSION = 'etapa0-5';
+const VERSION = 'etapa1a-1';
 const AUTH_DIR = process.env.AUTH_DIR || 'auth_info';
 const INICIO_MS = Date.now();
 let reinicioPendienteHasta = 0;
@@ -99,11 +104,12 @@ async function enviarElectricos(texto, mencionNumero) {
     if (!ID_ELECTRICOS) { console.log('[enviarElectricos] Sigue sin ID, abortando'); return; }
   }
   if (!sockRef) { console.log('[enviarElectricos] sockRef no disponible'); return; }
-  if (mencionNumero) {
-    const jid = mencionNumero.includes('@') ? mencionNumero : mencionNumero + '@s.whatsapp.net';
+  const menciones = !mencionNumero ? [] : (Array.isArray(mencionNumero) ? mencionNumero : [mencionNumero]);
+  if (menciones.length) {
+    const jids = menciones.map(function(n) { return String(n).includes('@') ? String(n) : (String(n).length > 13 ? n + '@lid' : n + '@s.whatsapp.net'); });
     try {
-      await sockRef.sendMessage(ID_ELECTRICOS, { text: texto, mentions: [jid] });
-      console.log('[enviarElectricos] Enviado con mención a ' + mencionNumero);
+      await sockRef.sendMessage(ID_ELECTRICOS, { text: texto, mentions: jids });
+      console.log('[enviarElectricos] Enviado con mención a ' + menciones.join(', '));
       return;
     } catch (e) { console.log('[enviarElectricos] Error con mención:', e.message); }
   }
@@ -363,6 +369,7 @@ async function procesarDesconexionManual(nombre) {
     await enviarProyectoBot('⚠️ No encontré a "' + nombre + '" conectado en ningún cajón.');
     return;
   }
+  if (c.usuario_actual) control.cancelarRecordatorio(c.usuario_actual);
   timers.cancelarTimerConexion(c.cajon);
   timers.cancelarTimerSesion(c.cajon);
   await db.liberarCajon(c.cajon);
@@ -403,7 +410,8 @@ async function procesarProyectoBot(texto, numeroFrom, nombreFrom) {
         '📊 *Consultas:*\n' +
         '• *fila* — ver lista de espera\n' +
         '• *estado* — ver cajones y fila\n' +
-        '• *quitar a [Nombre]* — sacar de la fila\n\n' +
+        '• *quitar a [Nombre]* — sacar de la fila\n' +
+        '• *N es Nombre* — decir quién ocupa el cajón N\n\n' +
         '⚠️ *Emergencia:*\n' +
         '• *reiniciar estado* — borrar todo y empezar de cero');
     return;
@@ -425,6 +433,19 @@ async function procesarProyectoBot(texto, numeroFrom, nombreFrom) {
     }
     await db.reiniciar();
     await enviarProyectoBot('🔄 Estado reiniciado. Todos los cajones libres y fila vacía.');
+    return;
+  }
+
+  // "44 es Nombre Apellido" — dice quién ocupa un cajón (cuando el reporte traía marca/placas en vez de nombre)
+  const mEs = texto.trim().match(/^(\d{2})\s+es\s+(.+)$/i);
+  if (mEs && db.CAJONES.indexOf(mEs[1]) !== -1) {
+    const cajonEs = mEs[1];
+    const nombreEs = mEs[2].trim();
+    const cEs = db.getEstado().cargadores[cajonEs];
+    if (!cEs || !cEs.ocupado) { await enviarProyectoBot('⚠️ El cajón ' + cajonEs + ' no está ocupado.'); return; }
+    const anterior = cEs.usuario_actual;
+    await db.renombrarOcupante(cajonEs, nombreEs);
+    await enviarProyectoBot('✅ Cajón ' + cajonEs + ': *' + nombreEs + '*' + (anterior && anterior !== nombreEs ? ' (antes «' + anterior + '»)' : '') + '.');
     return;
   }
 
@@ -560,144 +581,9 @@ async function procesarControl(texto, numeroFrom, nombreFrom) {
     return;
   }
 
-  // Reporte matutino — bloque con múltiples cajones
-  if (motor.esReporteMatutino(texto)) {
-    await procesarEstadoInicial(texto);
-    return;
-  }
-
-  // Conexión: "Cajón 44\nNombre HH:MM-HH:MM\nMarca\nPlacas"
-  const rConexion = motor.parsearAyudanteConexion(texto);
-  if (rConexion) {
-    await procesarConexionAyudante(rConexion);
-    return;
-  }
-
-  // Desconexión: "44 libre" / "44 libre Tania" / "Cajón 44 libre"
-  const rLibre = motor.parsearAyudanteLibre(texto);
-  if (rLibre) {
-    await procesarDesconexionAyudante(rLibre.cajon);
-    return;
-  }
-
-  // Recordatorio de desconexión: "se tiene que desconectar [Nombre]"
-  const mRecordatorio = texto.match(/se\s+tiene\s+que\s+desconect(?:ar|er)\s+(.+)/i) ||
-                        texto.match(/desconectar\s+(.+)/i) ||
-                        texto.match(/pedir\s+(?:a\s+)?(.+?)\s+que\s+se\s+desconect/i);
-  if (mRecordatorio) {
-    const nombreBuscado = mRecordatorio[1].trim();
-    // Buscar en cajones ocupados
-    const estado = db.getEstado();
-    let encontrado = null;
-    for (const cajon in estado.cargadores) {
-      const c = estado.cargadores[cajon];
-      if (c.ocupado && c.usuario_actual) {
-        const ul = c.usuario_actual.toLowerCase();
-        const nl = nombreBuscado.toLowerCase();
-        if (ul.includes(nl) || nl.includes(ul)) { encontrado = c; break; }
-      }
-    }
-    const numero = encontrado ? encontrado.numero_actual : null;
-    const nombre = encontrado ? encontrado.usuario_actual : nombreBuscado;
-    await iniciarRecordatorioDesconexion(nombre, numero);
-    return;
-  }
-}
-
-// FLUJO: recordatorio de desconexión
-async function iniciarRecordatorioDesconexion(nombre, numero) {
-  // Cancelar si ya hay uno activo para este usuario
-  if (recordatoriosDesconexion[nombre]) {
-    clearInterval(recordatoriosDesconexion[nombre]);
-    delete recordatoriosDesconexion[nombre];
-  }
-
-  async function enviarRecordatorio() {
-    const estado = db.getEstado();
-    // Verificar si el usuario sigue conectado
-    const sigueConectado = Object.values(estado.cargadores).some(function(c) {
-      return c.ocupado && c.usuario_actual &&
-        c.usuario_actual.toLowerCase().includes(nombre.toLowerCase());
-    });
-    if (!sigueConectado) {
-      // Ya se desconectó — cancelar recordatorios
-      clearInterval(recordatoriosDesconexion[nombre]);
-      delete recordatoriosDesconexion[nombre];
-      return;
-    }
-    if (numero) {
-      await enviarElectricos(nombre + ' @' + numero + ' por favor desconecta tu vehículo, el tiempo de carga ha terminado 🙏', numero);
-    } else {
-      await enviarElectricos(nombre + ' por favor desconecta tu vehículo, el tiempo de carga ha terminado 🙏', null);
-    }
-  }
-
-  // Enviar mensaje inmediatamente
-  await enviarRecordatorio();
-  // Repetir cada 15 minutos
-  recordatoriosDesconexion[nombre] = setInterval(enviarRecordatorio, 15 * 60 * 1000);
-  console.log('[recordatorio] Iniciado para ' + nombre + ' cada 15min');
-}
-
-function cancelarRecordatorioDesconexion(nombre) {
-  if (recordatoriosDesconexion[nombre]) {
-    clearInterval(recordatoriosDesconexion[nombre]);
-    delete recordatoriosDesconexion[nombre];
-    console.log('[recordatorio] Cancelado para ' + nombre);
-  }
-}
-
-// FLUJO: conexión reportada por ayudante
-async function procesarConexionAyudante(r) {
-  // Buscar en fila para obtener número
-  const candidatos = db.buscarEnFila(r.nombre);
-  const usuario = candidatos.length === 1 ? candidatos[0] : candidatos.find(function(u) {
-    return u.nombre.toLowerCase() === r.nombre.toLowerCase();
-  });
-  const numero = usuario ? usuario.numero : null;
-
-  // Calcular hora de inicio
-  const horaInicio = r.horaDesde ? _horaDesdeStr(r.horaDesde) : null;
-  await db.conectarUsuario(r.cajon, r.nombre, numero, horaInicio);
-  timers.cancelarTimerConexion(r.cajon);
-  await timers.iniciarTimerSesion(r.cajon);
-
-  // Notificar en Eléctricos si tenemos número
-  const estado = db.getEstado();
-  const c = estado.cargadores[String(r.cajon)];
-  const msSesion = c && c.vip ? db.MS_SESION_VIP : db.MS_SESION;
-  const finSesion = tiempo.horaLocal(Date.now() + msSesion);
-
-  if (numero) {
-    await enviarElectricos(r.nombre + ' @' + numero + ' ✅ quedaste conectado hasta las ' + finSesion, numero);
-  }
-  console.log('[CONTROL] Conexión: ' + r.nombre + ' cajón ' + r.cajon);
-}
-
-// FLUJO: desconexión reportada por ayudante
-async function procesarDesconexionAyudante(cajon) {
-  cajon = String(cajon);
-  const estado = db.getEstado();
-  const c = estado.cargadores[cajon];
-  if (!c || !c.ocupado) return;
-
-  // Cancelar recordatorio de desconexión si había uno activo
-  if (c.usuario_actual) cancelarRecordatorioDesconexion(c.usuario_actual);
-
-  timers.cancelarTimerConexion(cajon);
-  timers.cancelarTimerSesion(cajon);
-  await db.liberarCajon(cajon);
-
-  // Avisar al primero de la fila en Eléctricos
-  const siguiente = db.primeroEnFila();
-  if (siguiente && siguiente.numero) {
-    await enviarElectricos(
-      siguiente.nombre + ' @' + siguiente.numero + ' ya hay un lugar disponible para conectarte 🔌',
-      siguiente.numero
-    );
-    await db.setPendiente({ tipo: 'asignar_turno', cargador_id: cajon, nombre: siguiente.nombre, numero: siguiente.numero });
-  }
-  console.log('[CONTROL] Desconexión cajón ' + cajon);
+  // Todo lo demás lo interpreta el módulo del ayudante (conexiones, libres, recordatorios, reportes)
+  const atendido = await control.procesar(texto);
+  if (!atendido) console.log('[CONTROL] Sin interpretar: ' + texto.substring(0, 60).replace(/\n/g, ' / '));
 }
 
 function _horaDesdeStr(horaStr) {
@@ -811,9 +697,14 @@ async function resolverGrupo(sock, id) {
   }
 }
 function asignarGrupo(id, subject) {
+  const antes = ID_ELECTRICOS + '|' + ID_PROYECTO_BOT + '|' + ID_CONTROL;
   if (subject === GRUPO_ELECTRICOS)   ID_ELECTRICOS   = id;
   if (subject === GRUPO_PROYECTO_BOT) ID_PROYECTO_BOT = id;
   if (subject === GRUPO_CONTROL)      ID_CONTROL      = id;
+  if (antes !== ID_ELECTRICOS + '|' + ID_PROYECTO_BOT + '|' + ID_CONTROL) {
+    db.guardarGrupos({ electricos: ID_ELECTRICOS, proyecto_bot: ID_PROYECTO_BOT, control: ID_CONTROL })
+      .catch(function(e) { console.log('[grupos] no pude guardar:', e.message); });
+  }
 }
 
 async function detectarGrupos(sock, forzar) {
@@ -826,9 +717,10 @@ async function detectarGrupos(sock, forzar) {
     const grupos = await sock.groupFetchAllParticipating();
     for (const id in grupos) {
       const info = grupos[id];
-      if (info.subject === GRUPO_ELECTRICOS)   { ID_ELECTRICOS   = id; console.log('Grupo Eléctricos → ' + id); }
-      if (info.subject === GRUPO_PROYECTO_BOT) { ID_PROYECTO_BOT = id; console.log('Grupo Proyecto Bot → ' + id); }
-      if (info.subject === GRUPO_CONTROL)      { ID_CONTROL      = id; console.log('Grupo Control → ' + id); }
+      asignarGrupo(id, info.subject);
+      if (info.subject === GRUPO_ELECTRICOS || info.subject === GRUPO_PROYECTO_BOT || info.subject === GRUPO_CONTROL) {
+        console.log('Grupo "' + info.subject + '" → ' + id);
+      }
     }
     if (!ID_ELECTRICOS)   console.log('Grupo "' + GRUPO_ELECTRICOS + '" no encontrado');
     if (!ID_PROYECTO_BOT) console.log('Grupo "' + GRUPO_PROYECTO_BOT + '" no encontrado');
@@ -874,6 +766,13 @@ async function arrancar() {
     DisconnectReason      = baileys.DisconnectReason;
     fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion;
     await db.inicializar();
+    try {
+      const g = await db.cargarGrupos();
+      if (g.electricos)    ID_ELECTRICOS   = g.electricos;
+      if (g.proyecto_bot)  ID_PROYECTO_BOT = g.proyecto_bot;
+      if (g.control)       ID_CONTROL      = g.control;
+      console.log('[grupos] Cargados de Postgres: E=' + !!ID_ELECTRICOS + ' P=' + !!ID_PROYECTO_BOT + ' C=' + !!ID_CONTROL);
+    } catch (e) { console.log('[grupos] no pude cargar:', e.message); }
     await timers.reactivarTimers();
     programarReinicioNocturno();
     await iniciarBot();

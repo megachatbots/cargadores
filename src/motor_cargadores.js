@@ -69,7 +69,7 @@ const RE_RANGO = /(\d{1,2})[:.](\d{2})\s*(?:[-–—]|\ba\b|\bal\b|\bhasta\b)\s*
 const RE_PLACAS = /\b(?=[A-Z0-9]*\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{5,8}\b/;
 
 function parsearBloqueOcupado(lineas) {
-  let horaInicio = null, horaFin = null;
+  let horaInicio = null, horaFin = null, antesDe = false;
   const limpias = [];
   for (let l of lineas) {
     const m = l.match(RE_RANGO);
@@ -78,6 +78,7 @@ function parsearBloqueOcupado(lineas) {
       horaFin    = m[3] + ':' + m[4];
       l = l.replace(RE_RANGO, ' ');
     }
+    if (/\bantes de\b/i.test(l)) antesDe = true;
     l = l.replace(/\s+antes de.*$/i, ' ').replace(/\s+/g, ' ').trim();
     if (l) limpias.push(l);
   }
@@ -91,7 +92,8 @@ function parsearBloqueOcupado(lineas) {
   } else {
     marca = resto || null;
   }
-  return { nombre, horaInicio: horaInicio || '7:00', horaFin, marca, placas };
+  // Sin rango de horas: solo "antes de las 7:00" implica inicio 7:00; si no, la hora es desconocida (null)
+  return { nombre, horaInicio: horaInicio || (antesDe ? '7:00' : null), horaFin, marca, placas };
 }
 
 // PARSER REPORTE MATUTINO (regex, sin AI)

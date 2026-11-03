@@ -106,6 +106,8 @@ async function reactivarTimerSesionCajon(cajon) {
 function cancelarTimerSesion(cajon) {
   cajon = String(cajon);
   if (handles.sesion[cajon]) { clearTimeout(handles.sesion[cajon]); delete handles.sesion[cajon]; }
+  // También el aviso de "faltan 15 min": si no, podría dispararse sobre el siguiente ocupante del cajón
+  if (handles['aviso_' + cajon]) { clearTimeout(handles['aviso_' + cajon]); delete handles['aviso_' + cajon]; }
 }
 
 async function avisarProximoVencimiento(cajon) {

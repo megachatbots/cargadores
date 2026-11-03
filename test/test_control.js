@@ -1,0 +1,137 @@
+// test/control.js — Integración: mensajes reales del ayudante → estado y mensajes salientes (reloj falso)
+process.env.DATABASE_URL = ''; process.env.ANTHROPIC_API_KEY = 'x';
+const { mock } = require('node:test');
+const MIN = 60 * 1000;
+const T0 = Date.UTC(2026, 10, 3, 20, 30, 0); // 14:30 México
+mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: T0 });
+
+const db = require('../src/db_cargadores');
+const timers = require('../src/timers');
+const tiempo = require('../src/tiempo');
+const crear = require('../src/control').crear;
+
+const E = [], P = [], R = [];
+timers.setEnviarFn(async function(t) { P.push(t); });
+timers.setEnviarElectricosFn(async function(t, n) { E.push({ t: t, m: n }); });
+const control = crear({
+  db: db, timers: timers, tiempo: tiempo,
+  enviarElectricos: async function(t, m) { E.push({ t: t, m: m }); },
+  enviarProyectoBot: async function(t) { P.push(t); },
+  procesarReporte: async function(t) { R.push(t); }
+});
+
+async function avanzar(ms) { mock.timers.tick(ms); for (let i = 0; i < 6; i++) await new Promise(function(r) { setImmediate(r); }); }
+function limpiar() { E.length = 0; P.length = 0; R.length = 0; }
+// Estado limpio + reloj en T0 + sin timers vivos de escenarios anteriores
+async function reset() {
+  db.CAJONES.forEach(function(c) { timers.cancelarTimerConexion(c); timers.cancelarTimerSesion(c); });
+  control._detener();
+  Object.keys(control._pendientes).forEach(function(k) { delete control._pendientes[k]; });
+  await db.reiniciarTodo();
+  mock.timers.setTime(T0);
+  limpiar();
+}
+let ok = 0, fail = 0;
+function check(d, c, x) { if (c) { ok++; console.log('  ✅ ' + d); } else { fail++; console.log('  ❌ ' + d + (x ? ' → ' + x : '')); } }
+const cj = function(n) { return db.getEstado().cargadores[n]; };
+
+(async function() {
+  await db.inicializar();
+
+  console.log('\n1) "Se conecta" de alguien que NO está en la fila');
+  await reset();
+  await control.procesar('Se conecta \nCajón 41\nVíctor Ojeda \n33G579 Tesla \n1:22 A 4:22');
+  check('cajón 41 ocupado por Víctor Ojeda', cj('41').ocupado && cj('41').usuario_actual === 'Víctor Ojeda');
+  check('placas y marca guardadas', cj('41').placas === '33G579' && cj('41').marca === 'Tesla', JSON.stringify([cj('41').placas, cj('41').marca]));
+  check('inicio 1:22 p.m., sesión activa, termina 4:22 p.m.',
+    tiempo.horaLocal(cj('41').hora_inicio) === '01:22 p.m.' && cj('41').timer_sesion.activo &&
+    tiempo.horaLocal(new Date(cj('41').hora_inicio).getTime() + cj('41').timer_sesion.duracion_ms) === '04:22 p.m.');
+  check('sin número: no hay mensaje en Eléctricos ni avisos', E.length === 0 && P.length === 0, JSON.stringify({ E, P }));
+  await avanzar(2 * 60 * MIN + 52 * MIN); // 14:30 + 2h52 = 17:22 → 4:22 pm ya pasó (16:22)? no: 17:22
+  check('a las 4:22 p.m. el bot libera el cajón (timer calculado desde la hora real de conexión)', cj('41').ocupado === false);
+
+  console.log('\n2) Conecta alguien que SÍ está en la fila → se le avisa en Eléctricos y sale de la fila');
+  await reset();
+  await db.agregarFila('111', 'Pablo');
+  await db.agregarFila('222', 'Ana Pérez');
+  await control.procesar('Se conecta\nCajón 42\nPablo\n11A111 BYD\n' + '2:25 A 5:25');
+  check('Pablo en cajón 42 con su número', cj('42').usuario_actual === 'Pablo' && cj('42').numero_actual === '111');
+  check('Pablo salió de la fila, Ana sigue', db.getEstado().fila.length === 1 && db.getEstado().fila[0].nombre === 'Ana Pérez');
+  check('Eléctricos: mención a 111 con hora de fin', E.length === 1 && E[0].m === '111' && /quedaste conectado hasta las 0?5:25 p\.m\./.test(E[0].t), JSON.stringify(E));
+
+  console.log('\n3) Ocupante con nombre de marca → pregunta a admins');
+  limpiar();
+  await control.procesar('Se conecta\nCajón 44\nCupra\n62G718\n2:10 A 5:10');
+  check('queda conectado como "Cupra"', cj('44').usuario_actual === 'Cupra' && cj('44').placas === '62G718');
+  check('Proyecto Bot pregunta "44 es Nombre"', P.length === 1 && /44 es Nombre/.test(P[0]), JSON.stringify(P));
+  await db.renombrarOcupante('44', 'Ana Pérez');
+  check('"44 es Ana Pérez" renombra, toma su número y la saca de la fila', cj('44').usuario_actual === 'Ana Pérez' && cj('44').numero_actual === '222' && db.getEstado().fila.length === 0);
+
+  console.log('\n4) Se desconectan (varios) → UN mensaje, repetido cada 15 min hasta que liberen');
+  limpiar();
+  await control.procesar('Se desconectan \nPablo\nAna Pérez');
+  check('un solo mensaje con ambos nombres y menciones a 111 y 222', E.length === 1 && Array.isArray(E[0].m) && E[0].m.join() === '111,222' && /Pablo @111, Ana Pérez @222/.test(E[0].t), JSON.stringify(E));
+  await avanzar(15 * MIN);
+  check('a los 15 min se repite el mismo mensaje', E.length === 2 && E[1].t === E[0].t, E.length);
+  await control.procesar('42 libre');
+  limpiar();
+  await avanzar(15 * MIN);
+  check('Pablo ya liberó: el siguiente recordatorio solo menciona a Ana', E.length === 1 && E[0].m.join() === '222' && !/Pablo/.test(E[0].t), JSON.stringify(E));
+  await control.procesar('Cajón 44 libre');
+  limpiar();
+  await avanzar(30 * MIN);
+  check('todos liberaron: ya no hay más recordatorios', E.length === 0, JSON.stringify(E));
+
+  console.log('\n5) Se desconectan: nombre inexistente y ambiguo');
+  await reset();
+  await db.conectarUsuario('41', 'Nancy bañuelos', null); await db.conectarUsuario('42', 'Nancy López', null);
+  await control.procesar('Se desconectan\nPedro Pérez\nNancy');
+  check('no se envía nada a Eléctricos', E.length === 0, JSON.stringify(E));
+  check('Proyecto Bot avisa del no encontrado y del ambiguo', P.length === 1 && /Pedro Pérez/.test(P[0]) && /ambiguo/i.test(P[0]) && /cajón 41/.test(P[0]), JSON.stringify(P));
+  control._detener();
+
+  console.log('\n6) "41 y 44 libres" con dos personas esperando → se llama a dos distintas');
+  await reset();
+  await db.conectarUsuario('41', 'Luis', null); await db.conectarUsuario('44', 'Marta', null);
+  await db.agregarFila('333', 'Ana'); await db.agregarFila('444', 'Beto'); await db.agregarFila('555', 'Caro');
+  await control.procesar('41 y 44 libres');
+  check('41 y 44 liberados', !cj('41').ocupado && !cj('44').ocupado);
+  check('se avisa a Ana y a Beto (no a la misma dos veces, ni a Caro)', E.length === 2 && E[0].m === '333' && E[1].m === '444', JSON.stringify(E));
+
+  console.log('\n7) "N lugares disponibles"');
+  await reset();
+  await db.conectarUsuario('41', 'Luis', null);
+  await control.procesar('2 lugares disponibles');
+  check('discrepancia (bot tiene 7 libres) → avisa en Proyecto Bot', P.length === 1 && /2/.test(P[0]) && /7/.test(P[0]), JSON.stringify(P));
+  limpiar();
+  await control.procesar('2 lugares disponibles');
+  check('mismo aviso dentro de 10 min no se repite', P.length === 0);
+  limpiar();
+  await avanzar(11 * MIN);
+  await control.procesar('2 lugares disponibles');
+  check('pasados 10 min sí se vuelve a avisar', P.length === 1);
+  limpiar();
+  await control.procesar('7 lugares disponibles');
+  check('si coincide con lo que ve el bot, no avisa', P.length === 0);
+
+  console.log('\n8) Reporte y charla');
+  limpiar();
+  const rep = 'Cajón 41\nDavid antes de las 7:00\nVolt\n33K048\n\nCajón 42\nLibre';
+  await control.procesar(rep);
+  check('reporte de varios cajones se delega al cargador de estado inicial', R.length === 1 && R[0] === rep);
+  const sinInterpretar = await control.procesar('@210706850914377 apoyo para desconectar tu vehículo por favor');
+  check('charla del ayudante → no hace nada', sinInterpretar === false && E.length === 0);
+
+  console.log('\n9) Reporte sin hora ya no inventa "hasta 10:00 a.m."');
+  await reset();
+  const motor = require('../src/motor_cargadores');
+  await db.cargarEstadoInicial(motor.parsearReporteMatutino('Cajón 45\nCarlos Guadarrama\n83F796\n\nCajón 46\nCesar Mora\nCarga extendida'));
+  const res = db.resumenCargadores();
+  check('45 se muestra "(sin hora)"', /Cajón 45: Carlos Guadarrama \(sin hora\)/.test(res), res);
+  check('46 VIP se muestra "(carga extendida)"', /Cajón 46 ⭐: Cesar Mora \(carga extendida\)/.test(res), res);
+  check('45 no queda marcado vencido', !cj('45').timer_sesion.vencido && cj('45').timer_sesion.sin_hora === true);
+
+  console.log('\nResultado: ' + ok + '/' + (ok + fail) + ' ✅  ' + fail + ' ❌');
+  mock.timers.reset();
+  process.exit(fail ? 1 : 0);
+})().catch(function(e) { console.error('💥', e); process.exit(2); });

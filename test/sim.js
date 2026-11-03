@@ -90,6 +90,18 @@ async function conectar(cajon, nombre, numero) {
   await avanzar(2 * HORA + 1 * MIN);
   check('tras reinicio, la sesión vence a las 3 h reales desde la conexión', db.getEstado().cargadores['42'].ocupado === false);
 
+  console.log('\nEscenario 6: liberar un cajón cancela también el aviso de 15 min (no avisa al siguiente ocupante)');
+  await reset();
+  mock.timers.setTime(T0);
+  await conectar('48', 'Primero', '555');
+  await avanzar(2 * HORA + 40 * MIN);
+  timers.cancelarTimerConexion('48'); timers.cancelarTimerSesion('48');
+  await db.liberarCajon('48');
+  await conectar('48', 'Segundo', '666');
+  limpiar();
+  await avanzar(10 * MIN);
+  check('el aviso del ocupante anterior NO le llega al siguiente', !grupoElectricos.some(function(m) { return m.num === '666' && /faltan 15 minutos/.test(m.t); }), JSON.stringify(grupoElectricos));
+
   console.log('\nEscenario 5: medianoche México');
   mock.timers.setTime(T0);
   check('de 07:00 a medianoche faltan 17 h', Math.round(tiempo.msHastaMedianoche() / HORA) === 17, String(tiempo.msHastaMedianoche() / HORA));

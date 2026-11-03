@@ -221,7 +221,7 @@ async function liberarCajon(cajon) {
 
 // Conectar usuario manualmente (comando admin)
 // numero puede ser null si no está en la fila
-async function conectarUsuario(cajon, nombre, numero, horaInicio) {
+async function conectarUsuario(cajon, nombre, numero, horaInicio, extra) {
   cajon = String(cajon);
   const c = estado.cargadores[cajon];
   if (!c) return null;
@@ -232,6 +232,7 @@ async function conectarUsuario(cajon, nombre, numero, horaInicio) {
   c.usuario_actual = nombre;
   c.numero_actual  = numero || null;
   c.hora_inicio    = inicio;
+  if (extra) { c.marca = extra.marca || null; c.placas = extra.placas || null; }
   c.timer_conexion = { activo: false, hora_inicio: null, duracion_ms: MS_CONEXION, extensiones: 0 };
   c.timer_sesion   = { activo: true, hora_inicio: inicio, duracion_ms: msSesion };
   // Sacar de la fila si está
@@ -247,6 +248,33 @@ async function conectarUsuario(cajon, nombre, numero, horaInicio) {
   await guardar('conectar ' + nombre + ' en ' + cajon);
   return c;
 }
+
+// Ocupantes actuales (para búsquedas por nombre)
+function ocupantes() {
+  const out = [];
+  for (const cajon of CAJONES) {
+    const c = estado.cargadores[cajon];
+    if (c.ocupado && c.usuario_actual) out.push({ id: cajon, nombre: c.usuario_actual, numero: c.numero_actual || null });
+  }
+  return out;
+}
+
+// "44 es Nombre": corrige el nombre de quien ocupa un cajón y lo saca de la fila si estaba
+async function renombrarOcupante(cajon, nombre) {
+  cajon = String(cajon);
+  const c = estado.cargadores[cajon];
+  if (!c || !c.ocupado) return null;
+  c.usuario_actual = nombre;
+  const nl = nombre.toLowerCase();
+  const enFila = estado.fila.find(function(u) { const ul = u.nombre.toLowerCase(); return ul === nl || ul.includes(nl) || nl.includes(ul); });
+  if (enFila) { c.numero_actual = enFila.numero; estado.fila = estado.fila.filter(function(u) { return u !== enFila; }); }
+  await guardar('renombrar ocupante ' + cajon);
+  return c;
+}
+
+// IDs de grupos de WhatsApp (persisten entre deploys)
+async function cargarGrupos() { return (await pgGet('grupos_ids')) || {}; }
+async function guardarGrupos(g) { return pgSet('grupos_ids', g); }
 
 // Distancia de edición simplificada (para tolerancia de errores)
 function _similitud(a, b) {
@@ -312,10 +340,12 @@ async function cargarEstadoInicial(items) {
     c.placas         = item.placas || null;
 
     // Calcular timer de sesión desde hora de inicio
-    if (!c.vip) {
+    if (!c.vip && !item.horaInicio) {
+      // Sin hora de conexión: no se inventa. Queda ocupado, sin timer, marcado "sin hora".
+      c.timer_sesion = { activo: false, hora_inicio: null, duracion_ms: MS_SESION, sin_hora: true };
+    } else if (!c.vip) {
       const msSesion = MS_SESION;
-      // Usar hora del reporte o asumir 7:00 si no hay
-      const horaStr = item.horaInicio || '7:00';
+      const horaStr = item.horaInicio;
       const inicio  = _parsearHoraHoy(horaStr);
       if (inicio) {
         c.hora_inicio = inicio.toISOString();
@@ -379,12 +409,16 @@ function resumenCargadores() {
     if (c.ocupado) {
       let fin = '?';
       // Mostrar hora de fin aunque el timer ya haya vencido
-      if (c.timer_sesion && c.timer_sesion.hora_inicio) {
+      if (c.timer_sesion && c.timer_sesion.sin_hora) {
+        fin = null;
+      } else if (c.vip && !(c.timer_sesion && c.timer_sesion.hora_inicio)) {
+        fin = 'carga extendida';
+      } else if (c.timer_sesion && c.timer_sesion.hora_inicio) {
         fin = _horaLocal(new Date(new Date(c.timer_sesion.hora_inicio).getTime() + c.timer_sesion.duracion_ms).toISOString());
       } else if (c.hora_inicio) {
         fin = _horaLocal(new Date(new Date(c.hora_inicio).getTime() + MS_SESION).toISOString());
       }
-      txt += '🔴 Cajón ' + cajon + vipTag + ': ' + c.usuario_actual + ' hasta ' + fin;
+      txt += '🔴 Cajón ' + cajon + vipTag + ': ' + c.usuario_actual + (fin === null ? ' (sin hora)' : fin === 'carga extendida' ? ' (carga extendida)' : ' hasta ' + fin);
       if (c.placas) txt += ' (' + c.placas + ')';
       txt += '\n';
     } else if (c.timer_conexion && c.timer_conexion.activo) {
@@ -428,7 +462,7 @@ module.exports = {
   cargadorLibre, numLibres, tiempoEstimado,
   iniciarTimerConexion, extenderTimerConexion, confirmarConexion, liberarCajon,
   conectarUsuario, buscarCajonDeUsuario, buscarEnFila,
-  cargarEstadoInicial,
+  cargarEstadoInicial, ocupantes, renombrarOcupante, cargarGrupos, guardarGrupos,
   setPendiente, getPendiente,
   resumenFila, resumenCargadores, resumenCompleto, resumenListaEstatica,
   anotarManual, buscarEnFilaTolerate,
