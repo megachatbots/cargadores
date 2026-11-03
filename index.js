@@ -30,7 +30,7 @@ let conectado       = false;
 let sockRef         = null;
 let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion;
 
-const VERSION = 'etapa0-2';
+const VERSION = 'etapa0-3';
 const INICIO_MS = Date.now();
 let reinicioPendienteHasta = 0;
 let _gruposUltimo = 0, _gruposEnCurso = false;
@@ -774,8 +774,7 @@ async function iniciarBot() {
       console.log('[MSG][' + canal + '] ' + nombreFrom + ': ' + texto.substring(0, 60));
       // Si llega mensaje de grupo no reconocido, intentar redetectar grupos
       if (esGrupo && chat !== ID_ELECTRICOS && chat !== ID_PROYECTO_BOT && chat !== ID_CONTROL) {
-        console.log('[MSG] Grupo desconocido ' + chat + ' — redetectando...');
-        await detectarGrupos(sockRef);
+        await resolverGrupo(sockRef, chat);
       }
       try {
         if (esGrupo) {
@@ -790,6 +789,28 @@ async function iniciarBot() {
   });
 
   sock.ev.on('groups.update', async function() { await detectarGrupos(sock); });
+}
+
+// Resuelve UN grupo por su ID (llamada ligera; evita rate-overlimit de groupFetchAllParticipating)
+const _gruposCache = {}; // id -> { subject, hasta } ; hasta = ms hasta el que no se reintenta si falló
+async function resolverGrupo(sock, id) {
+  const c = _gruposCache[id];
+  if (c && c.subject) { asignarGrupo(id, c.subject); return; }
+  if (c && Date.now() < c.hasta) return;
+  try {
+    const meta = await sock.groupMetadata(id);
+    _gruposCache[id] = { subject: meta.subject, hasta: 0 };
+    console.log('[grupo] ' + id + ' = "' + meta.subject + '"');
+    asignarGrupo(id, meta.subject);
+  } catch (e) {
+    _gruposCache[id] = { subject: null, hasta: Date.now() + 60000 };
+    console.log('[grupo] groupMetadata ' + id + ': ' + e.message);
+  }
+}
+function asignarGrupo(id, subject) {
+  if (subject === GRUPO_ELECTRICOS)   ID_ELECTRICOS   = id;
+  if (subject === GRUPO_PROYECTO_BOT) ID_PROYECTO_BOT = id;
+  if (subject === GRUPO_CONTROL)      ID_CONTROL      = id;
 }
 
 async function detectarGrupos(sock, forzar) {
