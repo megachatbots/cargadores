@@ -58,10 +58,9 @@ async function conectar(cajon, nombre, numero) {
   check('cajón 44 sigue ocupado a los 2:45', db.getEstado().cargadores['44'].ocupado === true);
   limpiar();
   await avanzar(15 * MIN);
-  check('a las 3:00 el cajón 44 se libera', db.getEstado().cargadores['44'].ocupado === false);
-  check('a las 3:00 se avisa en Eléctricos', grupoElectricos.length === 1, JSON.stringify(grupoElectricos));
-  check('a las 3:00 se propone al primero de la fila (Tania)', grupoProyecto.some(function(t) { return t.includes('Tania'); }),
-    JSON.stringify(grupoProyecto));
+  check('a las 3:00 el cajón 44 NO se libera: queda ocupado con tiempo cumplido', db.getEstado().cargadores['44'].ocupado === true && db.getEstado().cargadores['44'].timer_sesion.cumplido === true);
+  check('a las 3:00 se avisa en Proyecto Bot que cumplió su tiempo', grupoProyecto.some(function(t) { return /Tiempo cumplido/.test(t) && t.includes('Juan Orta'); }), JSON.stringify(grupoProyecto));
+  check('a las 3:00 NO se llama a nadie de la fila (el cajón aún no está libre)', !grupoProyecto.some(function(t) { return t.includes('Le toca'); }) && db.getEstado().pendiente === null, JSON.stringify(grupoProyecto));
 
   console.log('\nEscenario 2: llamada de turno y vencimiento a los 15 min');
   await reset();
@@ -79,7 +78,7 @@ async function conectar(cajon, nombre, numero) {
   await avanzar(3 * HORA + 1 * MIN);
   check('VIP sigue ocupado a las 3 h', db.getEstado().cargadores['46'].ocupado === true);
   await avanzar(5 * HORA);
-  check('VIP se libera a las 8 h', db.getEstado().cargadores['46'].ocupado === false);
+  check('VIP cumple su tiempo a las 8 h (queda ocupado, tiempo cumplido)', db.getEstado().cargadores['46'].ocupado === true && db.getEstado().cargadores['46'].timer_sesion.cumplido === true);
 
   console.log('\nEscenario 4: reinicio del bot (reactivarTimers recalcula tiempo restante)');
   await reset();
@@ -88,7 +87,7 @@ async function conectar(cajon, nombre, numero) {
   await avanzar(1 * HORA);
   await timers.reactivarTimers();
   await avanzar(2 * HORA + 1 * MIN);
-  check('tras reinicio, la sesión vence a las 3 h reales desde la conexión', db.getEstado().cargadores['42'].ocupado === false);
+  check('tras reinicio, el tiempo se cumple a las 3 h reales desde la conexión', db.getEstado().cargadores['42'].timer_sesion.cumplido === true);
 
   console.log('\nEscenario 6: liberar un cajón cancela también el aviso de 15 min (no avisa al siguiente ocupante)');
   await reset();

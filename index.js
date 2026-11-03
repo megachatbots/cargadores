@@ -17,6 +17,7 @@ const control = require('./src/control').crear({
   enviarProyectoBot: function(t) { return enviarProyectoBot(t); },
   procesarReporte: function(t) { return procesarEstadoInicial(t); }
 });
+timers.setOnSesionCumplida(control.sesionCumplida);
 
 const GRUPO_ELECTRICOS   = process.env.GRUPO_ELECTRICOS    || 'Eléctricos';
 const GRUPO_PROYECTO_BOT = process.env.GRUPO_PROYECTO_BOT  || 'Proyecto Bot';
@@ -35,7 +36,7 @@ let conectado       = false;
 let sockRef         = null;
 let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion;
 
-const VERSION = 'etapa1a-1';
+const VERSION = 'etapa2a-1';
 const AUTH_DIR = process.env.AUTH_DIR || 'auth_info';
 const INICIO_MS = Date.now();
 let reinicioPendienteHasta = 0;
@@ -411,7 +412,8 @@ async function procesarProyectoBot(texto, numeroFrom, nombreFrom) {
         '• *fila* — ver lista de espera\n' +
         '• *estado* — ver cajones y fila\n' +
         '• *quitar a [Nombre]* — sacar de la fila\n' +
-        '• *N es Nombre* — decir quién ocupa el cajón N\n\n' +
+        '• *N es Nombre* — decir quién ocupa el cajón N\n' +
+        '• *N desde H:MM* — corregir la hora de conexión del cajón N\n\n' +
         '⚠️ *Emergencia:*\n' +
         '• *reiniciar estado* — borrar todo y empezar de cero');
     return;
@@ -433,6 +435,13 @@ async function procesarProyectoBot(texto, numeroFrom, nombreFrom) {
     }
     await db.reiniciar();
     await enviarProyectoBot('🔄 Estado reiniciado. Todos los cajones libres y fila vacía.');
+    return;
+  }
+
+  // "45 desde 1:30" — corrige la hora de conexión del ocupante de un cajón
+  const mDesde = texto.trim().match(/^(\d{2})\s+desde(?:\s+las)?\s+(\d{1,2}[:.]\d{2})$/i);
+  if (mDesde && db.CAJONES.indexOf(mDesde[1]) !== -1) {
+    await enviarProyectoBot(await control.ajustarInicio(mDesde[1], mDesde[2]));
     return;
   }
 
@@ -774,6 +783,7 @@ async function arrancar() {
       console.log('[grupos] Cargados de Postgres: E=' + !!ID_ELECTRICOS + ' P=' + !!ID_PROYECTO_BOT + ' C=' + !!ID_CONTROL);
     } catch (e) { console.log('[grupos] no pude cargar:', e.message); }
     await timers.reactivarTimers();
+    control.reanudarRecordatorios();
     programarReinicioNocturno();
     await iniciarBot();
   } catch (e) { console.error('[ARRANQUE] ERROR FATAL:', e); }

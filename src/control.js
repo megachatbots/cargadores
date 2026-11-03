@@ -4,6 +4,7 @@ const ayudante = require('./ayudante');
 
 const MS_RECORDATORIO = 15 * 60 * 1000;
 const MS_AVISO_DISPONIBLES = 10 * 60 * 1000;
+const MAX_RECORDATORIOS = 3;   // automáticos al cumplir el tiempo; después se alerta a admins
 
 function crear(deps) {
   const db = deps.db, timers = deps.timers, tiempo = deps.tiempo;
@@ -35,20 +36,38 @@ function crear(deps) {
   }
 
   async function tick() {
-    const vigentes = [];
-    Object.keys(pendientes).forEach(function(k) {
-      if (sigueConectado(pendientes[k])) vigentes.push(pendientes[k]);
-      else delete pendientes[k];
-    });
-    if (!vigentes.length) { detenerIntervalo(); return; }
-    await enviarRecordatorio(vigentes);
+    const vigentes = [], alertas = [];
+    for (const k of Object.keys(pendientes)) {
+      const p = pendientes[k];
+      if (!sigueConectado(p)) { delete pendientes[k]; continue; }
+      if (p.max && p.enviados >= p.max) {
+        alertas.push(p);
+        delete pendientes[k];
+        if (p.cajon) await db.marcarRecordatorios(p.cajon, p.max + 1);   // marca "ya alertado"
+        continue;
+      }
+      vigentes.push(p);
+    }
+    if (vigentes.length) {
+      await enviarRecordatorio(vigentes);
+      for (const p of vigentes) {
+        p.enviados = (p.enviados || 0) + 1;
+        if (p.max && p.cajon) await db.marcarRecordatorios(p.cajon, p.enviados);
+      }
+    }
+    for (const p of alertas) {
+      await proyectoBot('🚨 *' + p.nombre + '* (cajón ' + p.cajon + ') sigue sin desconectarse tras ' + p.max + ' recordatorios. ' +
+        'Pasen a revisar. Cuando se desconecte: *' + p.cajon + ' libre* en Control.');
+    }
+    if (!Object.keys(pendientes).length) detenerIntervalo();
   }
 
   function detenerIntervalo() { if (intervalo) { clearInterval(intervalo); intervalo = null; } }
 
   async function iniciarRecordatorios(personas) {
-    personas.forEach(function(p) { pendientes[ayudante.normalizar(p.nombre)] = p; });
+    personas.forEach(function(p) { p.enviados = 1; pendientes[ayudante.normalizar(p.nombre)] = p; });
     await enviarRecordatorio(personas);
+    for (const p of personas) { if (p.max && p.cajon) await db.marcarRecordatorios(p.cajon, 1); }
     if (!intervalo) intervalo = setInterval(function() { tick().catch(function(e) { console.log('[control] tick:', e.message); }); }, MS_RECORDATORIO);
     console.log('[recordatorio] Iniciado para ' + personas.map(function(p) { return p.nombre; }).join(', '));
   }
@@ -164,6 +183,49 @@ function crear(deps) {
       'Si hay diferencia, que el ayudante mande *N libre* o *Se conecta ...*, o pega el reporte de cajones.');
   }
 
+  // El timer de sesión llegó a 3 h (8 h VIP): recordatorio automático, el cajón sigue ocupado
+  async function sesionCumplida(info) {
+    await iniciarRecordatorios([{ nombre: info.nombre, numero: info.numero, cajon: info.cajon, max: MAX_RECORDATORIOS }]);
+    const espera = db.getEstado().fila.length;
+    await proyectoBot('⏰ *' + info.nombre + '* cumplió su tiempo en cajón ' + info.cajon + '. Sigue ocupado hasta que el ayudante reporte *' + info.cajon + ' libre*.\n' +
+      'Recordatorios: 1/' + MAX_RECORDATORIOS + ' enviado en Eléctricos' + (espera ? ' · En fila: ' + espera : '') + '.');
+  }
+
+  // Tras un reinicio del bot: retoma los recordatorios automáticos que quedaron a medias
+  function reanudarRecordatorios() {
+    let n = 0;
+    db.ocupantes().forEach(function(o) {
+      const c = db.getEstado().cargadores[o.id];
+      if (!c.timer_sesion || !c.timer_sesion.cumplido) return;
+      const enviados = c.recordatorios || 0;
+      if (enviados > MAX_RECORDATORIOS) return;   // ya se alertó a los admins
+      pendientes[ayudante.normalizar(o.nombre)] = { nombre: o.nombre, numero: o.numero, cajon: o.id, max: MAX_RECORDATORIOS, enviados: enviados };
+      n++;
+    });
+    if (n && !intervalo) intervalo = setInterval(function() { tick().catch(function(e) { console.log('[control] tick:', e.message); }); }, MS_RECORDATORIO);
+    console.log('[control] Recordatorios reanudados: ' + n);
+    return n;
+  }
+
+  // Comando admin "N desde H:MM" — devuelve el texto de respuesta
+  async function ajustarInicio(cajon, horaStr) {
+    cajon = String(cajon);
+    const c = db.getEstado().cargadores[cajon];
+    if (!c || !c.ocupado) return '⚠️ El cajón ' + cajon + ' no está ocupado.';
+    const r = await db.ajustarInicio(cajon, String(horaStr).replace('.', ':'));
+    if (!r) return '❌ No entendí la hora. Ejemplo: *' + cajon + ' desde 1:30*';
+    if (r.futura) return '⚠️ Esa hora (' + tiempo.horaLocal(r.iso) + ') es futura. Revisa y vuelve a intentar.';
+    timers.cancelarTimerSesion(cajon);
+    if (!r.vencido) await timers.reactivarTimerSesionCajon(cajon);
+    const desde = tiempo.horaLocal(r.iso), fin = tiempo.horaLocal(r.fin);
+    if (r.vencido) {
+      const hace = Math.round((tiempo.ahoraMs() - r.fin) / 60000);
+      return '✅ Cajón ' + cajon + ': *' + r.nombre + '* desde ' + desde + '. Su tiempo terminó a las ' + fin + ' (hace ' + hace + ' min).\n' +
+        'El cajón sigue ocupado hasta que el ayudante reporte *' + cajon + ' libre* o escribas *' + r.nombre + ' se desconectó*.';
+    }
+    return '✅ Cajón ' + cajon + ': *' + r.nombre + '* desde ' + desde + ', termina a las ' + fin + '.';
+  }
+
   async function procesar(textoMsg) {
     const eventos = ayudante.parsearMensajeAyudante(textoMsg);
     if (!eventos.length) return false;
@@ -177,7 +239,7 @@ function crear(deps) {
     return true;
   }
 
-  return { procesar, cancelarRecordatorio, _pendientes: pendientes, _detener: detenerIntervalo };
+  return { procesar, ajustarInicio, sesionCumplida, reanudarRecordatorios, cancelarRecordatorio, _pendientes: pendientes, _detener: detenerIntervalo };
 }
 
 module.exports = { crear };

@@ -249,6 +249,42 @@ async function conectarUsuario(cajon, nombre, numero, horaInicio, extra) {
   return c;
 }
 
+// Cumplió su tiempo (3 h / 8 h VIP): el cajón sigue ocupado hasta que el ayudante lo reporte libre
+async function marcarTiempoCumplido(cajon) {
+  cajon = String(cajon);
+  const c = estado.cargadores[cajon];
+  if (!c || !c.ocupado) return null;
+  c.timer_sesion = Object.assign({}, c.timer_sesion, { activo: false, cumplido: true });
+  c.recordatorios = 0;
+  await guardar('tiempo cumplido ' + cajon);
+  return c;
+}
+async function marcarRecordatorios(cajon, n) {
+  const c = estado.cargadores[String(cajon)];
+  if (!c || !c.ocupado) return;
+  c.recordatorios = n;
+  await guardar('recordatorios ' + cajon);
+}
+
+// "45 desde 1:30": corrige la hora de conexión de quien ocupa el cajón y recalcula su fin de sesión
+async function ajustarInicio(cajon, horaStr) {
+  cajon = String(cajon);
+  const c = estado.cargadores[cajon];
+  if (!c || !c.ocupado) return null;
+  const iso = tiempo.horaLaboralAISO(horaStr);
+  if (!iso) return null;
+  const ms = c.vip ? MS_SESION_VIP : MS_SESION;
+  const ini = new Date(iso).getTime();
+  const ahora = tiempo.ahoraMs();
+  if (ini > ahora + 60000) return { futura: true, iso: iso };
+  const fin = ini + ms;
+  c.hora_inicio = iso;
+  c.timer_sesion = { activo: fin > ahora, hora_inicio: iso, duracion_ms: ms };
+  if (fin <= ahora) c.timer_sesion.vencido = true;
+  await guardar('ajustar inicio ' + cajon);
+  return { iso: iso, fin: fin, vencido: fin <= ahora, nombre: c.usuario_actual };
+}
+
 // Ocupantes actuales (para búsquedas por nombre)
 function ocupantes() {
   const out = [];
@@ -418,7 +454,8 @@ function resumenCargadores() {
       } else if (c.hora_inicio) {
         fin = _horaLocal(new Date(new Date(c.hora_inicio).getTime() + MS_SESION).toISOString());
       }
-      txt += '🔴 Cajón ' + cajon + vipTag + ': ' + c.usuario_actual + (fin === null ? ' (sin hora)' : fin === 'carga extendida' ? ' (carga extendida)' : ' hasta ' + fin);
+      const cumplido = c.timer_sesion && c.timer_sesion.cumplido ? ' ⏰ tiempo cumplido' : '';
+      txt += '🔴 Cajón ' + cajon + vipTag + ': ' + c.usuario_actual + (fin === null ? ' (sin hora)' : fin === 'carga extendida' ? ' (carga extendida)' : ' hasta ' + fin) + cumplido;
       if (c.placas) txt += ' (' + c.placas + ')';
       txt += '\n';
     } else if (c.timer_conexion && c.timer_conexion.activo) {
@@ -462,7 +499,7 @@ module.exports = {
   cargadorLibre, numLibres, tiempoEstimado,
   iniciarTimerConexion, extenderTimerConexion, confirmarConexion, liberarCajon,
   conectarUsuario, buscarCajonDeUsuario, buscarEnFila,
-  cargarEstadoInicial, ocupantes, renombrarOcupante, cargarGrupos, guardarGrupos,
+  cargarEstadoInicial, ocupantes, renombrarOcupante, ajustarInicio, marcarTiempoCumplido, marcarRecordatorios, cargarGrupos, guardarGrupos,
   setPendiente, getPendiente,
   resumenFila, resumenCargadores, resumenCompleto, resumenListaEstatica,
   anotarManual, buscarEnFilaTolerate,

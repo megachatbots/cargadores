@@ -20,6 +20,7 @@ const control = crear({
   procesarReporte: async function(t) { R.push(t); }
 });
 
+timers.setOnSesionCumplida(control.sesionCumplida);
 async function avanzar(ms) { mock.timers.tick(ms); for (let i = 0; i < 6; i++) await new Promise(function(r) { setImmediate(r); }); }
 function limpiar() { E.length = 0; P.length = 0; R.length = 0; }
 // Estado limpio + reloj en T0 + sin timers vivos de escenarios anteriores
@@ -48,7 +49,7 @@ const cj = function(n) { return db.getEstado().cargadores[n]; };
     tiempo.horaLocal(new Date(cj('41').hora_inicio).getTime() + cj('41').timer_sesion.duracion_ms) === '04:22 p.m.');
   check('sin número: no hay mensaje en Eléctricos ni avisos', E.length === 0 && P.length === 0, JSON.stringify({ E, P }));
   await avanzar(2 * 60 * MIN + 52 * MIN); // 14:30 + 2h52 = 17:22 → 4:22 pm ya pasó (16:22)? no: 17:22
-  check('a las 4:22 p.m. el bot libera el cajón (timer calculado desde la hora real de conexión)', cj('41').ocupado === false);
+  check('a las 4:22 p.m. se cumple el tiempo (calculado desde la hora real de conexión) y el cajón NO se libera solo', cj('41').timer_sesion.cumplido === true && cj('41').ocupado === true);
 
   console.log('\n2) Conecta alguien que SÍ está en la fila → se le avisa en Eléctricos y sale de la fila');
   await reset();
@@ -130,6 +131,68 @@ const cj = function(n) { return db.getEstado().cargadores[n]; };
   check('45 se muestra "(sin hora)"', /Cajón 45: Carlos Guadarrama \(sin hora\)/.test(res), res);
   check('46 VIP se muestra "(carga extendida)"', /Cajón 46 ⭐: Cesar Mora \(carga extendida\)/.test(res), res);
   check('45 no queda marcado vencido', !cj('45').timer_sesion.vencido && cj('45').timer_sesion.sin_hora === true);
+
+  console.log('\n10) Comando "N desde H:MM" (reloj: 14:30)');
+  await reset();
+  await db.conectarUsuario('45', 'Carlos Guadarrama', null);
+  let m = await control.ajustarInicio('45', '1:30');
+  check('45 desde 1:30 → termina 4:30 p.m., sesión activa', /desde 0?1:30 p\.m\./.test(m) && /termina a las 0?4:30 p\.m\./.test(m) && cj('45').timer_sesion.activo === true, m);
+  await avanzar(2 * 60 * MIN + 1 * MIN);
+  check('el timer corregido cumple el tiempo a las 4:30 p.m.', cj('45').timer_sesion.cumplido === true);
+  await reset();
+  await db.conectarUsuario('48', 'Brenda Cervantes', null);
+  m = await control.ajustarInicio('48', '9:00');
+  check('48 desde 9:00 → ya venció: sigue ocupado, sin timer, avisa cómo liberarlo', cj('48').ocupado === true && cj('48').timer_sesion.activo === false && cj('48').timer_sesion.vencido === true && /sigue ocupado/.test(m) && /48 libre/.test(m), m);
+  m = await control.ajustarInicio('48', '5:10');
+  check('hora futura (5:10 p.m. cuando son las 2:30) se rechaza', /futura/.test(m) && cj('48').timer_sesion.vencido === true, m);
+  m = await control.ajustarInicio('42', '1:30');
+  check('cajón libre → avisa', /no está ocupado/.test(m), m);
+  m = await control.ajustarInicio('48', 'abc');
+  check('hora ilegible → da ejemplo', /No entendí/.test(m), m);
+  m = await control.ajustarInicio('48', '1.30');
+  check('acepta "1.30" con punto', /✅/.test(m), m);
+
+  console.log('\n11) Tiempo cumplido: 3 recordatorios cada 15 min y luego alerta a admins; el cajón sigue ocupado');
+  await reset();
+  await db.conectarUsuario('44', 'Arturo Montaño', '777', tiempo.horaLaboralAISO('11:45'));   // termina 2:45 p.m.
+  await db.agregarFila('888', 'Alix Córdova');
+  await timers.reactivarTimerSesionCajon('44');
+  await avanzar(15 * MIN + 1000);   // 14:45
+  check('2:45: primer recordatorio en Eléctricos con mención a 777', E.length === 1 && E[0].m.join() === '777' && /Arturo Montaño @777 por favor desconecta/.test(E[0].t), JSON.stringify(E));
+  check('2:45: Proyecto Bot informa 1/3 y que sigue ocupado; resumen marca ⏰', P.length === 1 && /1\/3/.test(P[0]) && /44 libre/.test(P[0]) && /tiempo cumplido/.test(db.resumenCargadores()), JSON.stringify(P));
+  check('2:45: el cajón sigue ocupado y NO se llama a Alix', cj('44').ocupado === true && db.getEstado().pendiente === null && !E.some(function(x) { return x.m === '888'; }));
+  check('contador persistido = 1', cj('44').recordatorios === 1, cj('44').recordatorios);
+  await avanzar(15 * MIN); await avanzar(15 * MIN);   // 3:00 y 3:15
+  check('3 recordatorios en total', E.filter(function(x) { return /desconecta/.test(x.t); }).length === 3, E.length);
+  limpiar();
+  await avanzar(15 * MIN);   // 3:30
+  check('al cuarto turno NO hay otro recordatorio y se alerta a admins', E.length === 0 && P.length === 1 && /🚨/.test(P[0]) && /3 recordatorios/.test(P[0]) && /44 libre/.test(P[0]), JSON.stringify({ E, P }));
+  limpiar();
+  await avanzar(60 * MIN);
+  check('después de la alerta no hay más mensajes', E.length === 0 && P.length === 0, JSON.stringify({ E, P }));
+  await control.procesar('44 libre');
+  check('el ayudante reporta "44 libre" → se libera y ahora sí se llama a Alix', !cj('44').ocupado && E.length === 1 && E[0].m === '888', JSON.stringify(E));
+
+  console.log('\n12) Reinicio del bot a mitad de los recordatorios: se retoman sin reiniciar la cuenta');
+  await reset();
+  await db.conectarUsuario('42', 'Pablo Monsalvo', '999', tiempo.horaLaboralAISO('11:45'));
+  await timers.reactivarTimerSesionCajon('42');
+  await avanzar(15 * MIN + 1000);          // primer recordatorio (1/3)
+  limpiar();
+  control._detener(); Object.keys(control._pendientes).forEach(function(k) { delete control._pendientes[k]; });   // "se cayó el bot"
+  const n = control.reanudarRecordatorios();
+  check('se reanuda 1 recordatorio pendiente', n === 1);
+  await avanzar(15 * MIN);
+  check('siguiente recordatorio sale en 15 min (2/3), no 1/3', E.length === 1 && cj('42').recordatorios === 2, JSON.stringify({ E, r: cj('42').recordatorios }));
+  await avanzar(15 * MIN);
+  check('tercer recordatorio (3/3)', cj('42').recordatorios === 3);
+  limpiar();
+  await avanzar(15 * MIN);
+  check('luego alerta a admins una sola vez', P.length === 1 && /🚨/.test(P[0]) && cj('42').recordatorios === 4, JSON.stringify(P));
+  control._detener(); Object.keys(control._pendientes).forEach(function(k) { delete control._pendientes[k]; });
+  limpiar();
+  check('tras la alerta, un reinicio ya no reanuda nada', control.reanudarRecordatorios() === 0);
+  control._detener();
 
   console.log('\nResultado: ' + ok + '/' + (ok + fail) + ' ✅  ' + fail + ' ❌');
   mock.timers.reset();

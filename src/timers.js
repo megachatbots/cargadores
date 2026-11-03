@@ -3,6 +3,8 @@ const db = require('./db_cargadores');
 
 // Wrappers dinámicos — se actualizan en cada reconexión de Baileys
 const _fns = { proyectoBot: null, electricos: null };
+const _hooks = { sesionCumplida: null };
+function setOnSesionCumplida(fn) { _hooks.sesionCumplida = fn; }
 
 function setEnviarFn(fn) { _fns.proyectoBot = fn; }
 function setEnviarElectricosFn(fn) { _fns.electricos = fn; }
@@ -129,34 +131,17 @@ async function avisarProximoVencimiento(cajon) {
 async function notificarSesionTerminada(cajon) {
   cajon = String(cajon);
   delete handles.sesion[cajon];
-  const estado = db.getEstado();
-  const c = estado.cargadores[cajon];
+  const c = db.getEstado().cargadores[cajon];
   if (!c || !c.ocupado) return;
   const nombre = c.usuario_actual;
   const numero = c.numero_actual;
-  console.log('[timers] Sesion terminada — cajón ' + cajon + ', ' + nombre);
-  await db.liberarCajon(cajon);
-  if (numero && _fns.electricos) {
-    await enviarElectricosConMencion(nombre, numero, '@' + numero + ' expiró tu tiempo de conexión, favor de desconectarte 🙏');
+  console.log('[timers] Tiempo cumplido — cajón ' + cajon + ', ' + nombre);
+  // El cajón NO se libera: el ayudante es la fuente de verdad (N libre / "se desconectó").
+  await db.marcarTiempoCumplido(cajon);
+  if (_hooks.sesionCumplida) {
+    await _hooks.sesionCumplida({ cajon: cajon, nombre: nombre, numero: numero });
   } else {
-    await enviar('🔋 *Sesión terminada*\n' + nombre + ' cumplió su tiempo en cajón ' + cajon + '.\n\n📋 *Copiar al ayudante:*\nEl cajón ' + cajon + ' de ' + nombre + ' está libre.');
-  }
-  const est2 = db.getEstado();
-  // Contar cuántos usuarios ya tienen turno activo (timer_conexion activo)
-  const conTurnoActivo = new Set();
-  for (const c in est2.cargadores) {
-    const carg = est2.cargadores[c];
-    if (carg.timer_conexion && carg.timer_conexion.activo && carg.usuario_actual) {
-      conTurnoActivo.add(carg.usuario_actual.toLowerCase());
-    }
-  }
-  // Buscar el primero de la fila que NO tenga turno activo ya
-  const siguiente = est2.fila.find(function(u) {
-    return !conTurnoActivo.has(u.nombre.toLowerCase());
-  });
-  if (siguiente) {
-    await enviar('⚡ Cajón ' + cajon + ' libre. Le toca a *' + siguiente.nombre + '*.\n¿Confirmas? Responde *sí*');
-    await db.setPendiente({ tipo: 'asignar_turno', cargador_id: cajon, nombre: siguiente.nombre, numero: siguiente.numero });
+    await enviar('⏰ *Tiempo cumplido*\nCajón ' + cajon + ' — ' + nombre + '.\nSigue ocupado hasta que el ayudante reporte *' + cajon + ' libre*.');
   }
 }
 
@@ -200,7 +185,7 @@ async function reactivarTimers() {
 }
 
 module.exports = {
-  setEnviarFn, setEnviarElectricosFn,
+  setEnviarFn, setEnviarElectricosFn, setOnSesionCumplida,
   iniciarTimerConexion, extenderTimerConexion, cancelarTimerConexion,
   iniciarTimerSesion, cancelarTimerSesion, reactivarTimerSesionCajon,
   preguntarConexion, avisarProximoVencimiento, notificarSesionTerminada,
