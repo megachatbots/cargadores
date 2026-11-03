@@ -15,11 +15,12 @@ let estado   = null;
 // POSTGRES
 async function conectarPG() {
   if (pgClient) return pgClient;
-  if (!process.env.DATABASE_URL) return null;
+  if (!process.env.DATABASE_URL) { if (!conectarPG._avisado) { console.log('[DB_C] ⚠️ DATABASE_URL no definida — SIN persistencia (el estado se pierde al reiniciar)'); conectarPG._avisado = true; } return null; }
   try {
     const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false }, max: 3 });
     await pool.query('CREATE TABLE IF NOT EXISTS cargadores_bot (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMP DEFAULT NOW())');
     pgClient = pool;
+    console.log('[DB_C] PostgreSQL conectado');
     return pgClient;
   } catch (e) { console.error('[DB_C] Error PG:', e.message); return null; }
 }
@@ -105,6 +106,7 @@ async function reiniciarTodo() {
 }
 
 function getEstado() { return estado; }
+function persistencia() { return !!pgClient; }
 
 // FILA
 async function agregarFila(numero, nombre) {
@@ -421,7 +423,7 @@ function _parsearHoraHoy(horaStr) {
 }
 
 module.exports = {
-  inicializar, getEstado, guardar, reiniciar, reiniciarTodo,
+  inicializar, getEstado, persistencia, guardar, reiniciar, reiniciarTodo,
   agregarFila, moverAlFinal, quitarFila, primeroEnFila,
   cargadorLibre, numLibres, tiempoEstimado,
   iniciarTimerConexion, extenderTimerConexion, confirmarConexion, liberarCajon,

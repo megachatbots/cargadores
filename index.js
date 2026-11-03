@@ -30,7 +30,8 @@ let conectado       = false;
 let sockRef         = null;
 let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion;
 
-const VERSION = 'etapa0-3';
+const VERSION = 'etapa0-4';
+const AUTH_DIR = process.env.AUTH_DIR || 'auth_info';
 const INICIO_MS = Date.now();
 let reinicioPendienteHasta = 0;
 let _gruposUltimo = 0, _gruposEnCurso = false;
@@ -68,6 +69,8 @@ const server = http.createServer(async function(req, res) {
       arranque: tiempo.horaLocal(INICIO_MS),
       hora_mexico: tiempo.horaLocal(Date.now()),
       conectado: conectado,
+      persistencia_db: db.persistencia(),
+      auth_dir: AUTH_DIR,
       grupos: { electricos: !!ID_ELECTRICOS, proyecto_bot: !!ID_PROYECTO_BOT, control: !!ID_CONTROL },
       estado: resumen
     }));
@@ -728,8 +731,8 @@ async function procesarPrivado(chat, texto, numeroFrom) {
 
 // BAILEYS
 async function iniciarBot() {
-  console.log('[BAILEYS] Iniciando...');
-  const { state, saveCreds } = await useMultiFileAuthState('auth_info');
+  console.log('[BAILEYS] Iniciando... (sesión en ' + AUTH_DIR + ')');
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   let waVersion = [2, 3000, 1040125391]; // respaldo si no se puede consultar la última
   try {
     if (fetchLatestBaileysVersion) {
