@@ -117,7 +117,7 @@ async function avisarProximoVencimiento(cajon) {
   const nombre = c.usuario_actual;
   const numero = c.numero_actual;
   console.log('[timers] Aviso 15min — cajón ' + cajon + ', ' + nombre);
-  if (numero && _enviarElectricos) {
+  if (numero && _fns.electricos) {
     await enviarElectricosConMencion(nombre, numero, '@' + numero + ' faltan 15 minutos para desconectarte ⚡');
   } else {
     await enviar('⏰ *Aviso:* ' + nombre + ' tiene 15 minutos antes de que expire su sesión en cajón ' + cajon + '.');
@@ -134,7 +134,7 @@ async function notificarSesionTerminada(cajon) {
   const numero = c.numero_actual;
   console.log('[timers] Sesion terminada — cajón ' + cajon + ', ' + nombre);
   await db.liberarCajon(cajon);
-  if (numero && _enviarElectricos) {
+  if (numero && _fns.electricos) {
     await enviarElectricosConMencion(nombre, numero, '@' + numero + ' expiró tu tiempo de conexión, favor de desconectarte 🙏');
   } else {
     await enviar('🔋 *Sesión terminada*\n' + nombre + ' cumplió su tiempo en cajón ' + cajon + '.\n\n📋 *Copiar al ayudante:*\nEl cajón ' + cajon + ' de ' + nombre + ' está libre.');

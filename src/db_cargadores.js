@@ -1,3 +1,4 @@
+const tiempo = require('./tiempo');
 // src/db_cargadores.js — Estado de cargadores eléctricos
 const { Pool } = require('pg');
 
@@ -109,7 +110,7 @@ function getEstado() { return estado; }
 async function agregarFila(numero, nombre) {
   const yaEsta = estado.fila.find(function(u) { return u.numero === numero; });
   if (yaEsta) return { ok: false, yaEsta: true, posicion: estado.fila.indexOf(yaEsta) + 1 };
-  const item = { id: estado.proximoId++, numero, nombre: nombre || numero, hora_solicitud: new Date().toISOString() };
+  const item = { id: estado.proximoId++, numero, nombre: nombre || numero, hora_solicitud: tiempo.ahoraISO() };
   estado.fila.push(item);
   // Registrar en lista estática (no se modifica después)
   if (!estado.lista_estatica) estado.lista_estatica = [];
@@ -126,7 +127,7 @@ async function anotarManual(nombre) {
   const yaEsta = estado.fila.find(function(u) { return u.nombre.toLowerCase() === nombre.toLowerCase(); });
   if (yaEsta) return { ok: false, yaEsta: true, posicion: estado.fila.indexOf(yaEsta) + 1 };
   const id = 'manual_' + (estado.proximoId++);
-  const hora = new Date().toISOString();
+  const hora = tiempo.ahoraISO();
   const item = { id, numero: id, nombre, hora_solicitud: hora, manual: true };
   estado.fila.push(item);
   if (!estado.lista_estatica) estado.lista_estatica = [];
@@ -139,7 +140,7 @@ async function moverAlFinal(numero) {
   const idx = estado.fila.findIndex(function(u) { return u.numero === numero; });
   if (idx === -1) return null;
   const item = estado.fila.splice(idx, 1)[0];
-  item.hora_solicitud = new Date().toISOString();
+  item.hora_solicitud = tiempo.ahoraISO();
   estado.fila.push(item);
   await guardar('mover al final');
   return { posicion: estado.fila.length, item };
@@ -177,7 +178,7 @@ async function iniciarTimerConexion(cajon, nombre, numero) {
   if (!c) return null;
   c.usuario_actual = nombre;
   c.numero_actual  = numero;
-  c.timer_conexion = { activo: true, hora_inicio: new Date().toISOString(), duracion_ms: MS_CONEXION, extensiones: 0 };
+  c.timer_conexion = { activo: true, hora_inicio: tiempo.ahoraISO(), duracion_ms: MS_CONEXION, extensiones: 0 };
   await guardar('timer conexion ' + cajon);
   return c;
 }
@@ -186,7 +187,7 @@ async function extenderTimerConexion(cajon) {
   cajon = String(cajon);
   const c = estado.cargadores[cajon];
   if (!c || !c.timer_conexion.activo) return null;
-  c.timer_conexion.hora_inicio = new Date().toISOString();
+  c.timer_conexion.hora_inicio = tiempo.ahoraISO();
   c.timer_conexion.extensiones++;
   await guardar('extender timer ' + cajon);
   return c;
@@ -198,9 +199,9 @@ async function confirmarConexion(cajon) {
   if (!c) return null;
   const msSesion = c.vip ? MS_SESION_VIP : MS_SESION;
   c.ocupado        = true;
-  c.hora_inicio    = new Date().toISOString();
+  c.hora_inicio    = tiempo.ahoraISO();
   c.timer_conexion = { activo: false, hora_inicio: null, duracion_ms: MS_CONEXION, extensiones: 0 };
-  c.timer_sesion   = { activo: true, hora_inicio: new Date().toISOString(), duracion_ms: msSesion };
+  c.timer_sesion   = { activo: true, hora_inicio: tiempo.ahoraISO(), duracion_ms: msSesion };
   estado.fila = estado.fila.filter(function(u) { return u.numero !== c.numero_actual; });
   await guardar('conexion confirmada ' + cajon);
   return c;
@@ -224,7 +225,7 @@ async function conectarUsuario(cajon, nombre, numero, horaInicio) {
   if (!c) return null;
   const msSesion = c.vip ? MS_SESION_VIP : MS_SESION;
   // Usar horaInicio si viene (matutino), si no usar ahora
-  const inicio = horaInicio ? horaInicio : new Date().toISOString();
+  const inicio = horaInicio ? horaInicio : tiempo.ahoraISO();
   c.ocupado        = true;
   c.usuario_actual = nombre;
   c.numero_actual  = numero || null;
@@ -317,7 +318,7 @@ async function cargarEstadoInicial(items) {
       if (inicio) {
         c.hora_inicio = inicio.toISOString();
         const finMs   = inicio.getTime() + msSesion;
-        const ahoraMs = Date.now();
+        const ahoraMs = tiempo.ahoraMs();
         if (finMs > ahoraMs) {
           c.timer_sesion = { activo: true, hora_inicio: inicio.toISOString(), duracion_ms: msSesion };
         } else {
@@ -403,9 +404,7 @@ function resumenListaEstatica() {
   }
   let txt = '📋 *Lista estática — orden de llegada*\n\n';
   estado.lista_estatica.forEach(function(u, i) {
-    const hora = new Date(u.hora_solicitud).toLocaleTimeString('es-MX', {
-      hour: '2-digit', minute: '2-digit', timeZone: 'America/Mexico_City'
-    });
+    const hora = tiempo.horaLocal(u.hora_solicitud);
     txt += (i + 1) + '. ' + u.nombre + ' — ' + hora + '\n';
   });
   return txt;
@@ -413,21 +412,12 @@ function resumenListaEstatica() {
 
 // UTILS
 function _horaLocal(iso) {
-  if (!iso) return '?';
-  return new Date(iso).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Mexico_City' });
+  return tiempo.horaLocal(iso);
 }
 
 function _parsearHoraHoy(horaStr) {
-  // "9:30" → Date de hoy con esa hora en México
-  const m = horaStr.match(/(\d{1,2}):(\d{2})/);
-  if (!m) return null;
-  const ahora = new Date();
-  // Convertir a hora México
-  const fechaMex = new Date(ahora.toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
-  fechaMex.setHours(parseInt(m[1]), parseInt(m[2]), 0, 0);
-  // Ajustar offset
-  const offset = ahora.getTime() - new Date(ahora.toLocaleString('en-US', { timeZone: 'America/Mexico_City' })).getTime();
-  return new Date(fechaMex.getTime() + offset);
+  const iso = tiempo.horaStrAISO(horaStr);
+  return iso ? new Date(iso) : null;
 }
 
 module.exports = {

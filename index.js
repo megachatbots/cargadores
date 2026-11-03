@@ -10,6 +10,7 @@ const pino = require('pino');
 const db    = require('./src/db_cargadores');
 const motor = require('./src/motor_cargadores');
 const timers = require('./src/timers');
+const tiempo = require('./src/tiempo');
 
 const GRUPO_ELECTRICOS   = process.env.GRUPO_ELECTRICOS    || 'Eléctricos';
 const GRUPO_PROYECTO_BOT = process.env.GRUPO_PROYECTO_BOT  || 'Proyecto Bot';
@@ -29,6 +30,11 @@ let conectado       = false;
 let sockRef         = null;
 let makeWASocket, useMultiFileAuthState, DisconnectReason;
 
+const VERSION = 'etapa0-1';
+const INICIO_MS = Date.now();
+let reinicioPendienteHasta = 0;
+let _gruposUltimo = 0, _gruposEnCurso = false;
+
 // LOGGING
 process.on('uncaughtException',  function(e) { console.error('[UNCAUGHT]', e); });
 process.on('unhandledRejection', function(e) { console.error('[UNHANDLED]', e); });
@@ -47,6 +53,24 @@ const server = http.createServer(async function(req, res) {
     }
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     return res.end('<body style="font-family:sans-serif;text-align:center;padding:40px"><h2>Iniciando</h2><script>setTimeout(()=>location.reload(),5000)</script></body>');
+  }
+  if (req.url === '/version') {
+    let resumen = null;
+    try {
+      const e = db.getEstado();
+      const cs = Object.keys(e.cargadores || {});
+      resumen = { fila: (e.fila || []).length, ocupados: cs.filter(function(k) { return e.cargadores[k].ocupado; }).length, cajones: cs.length };
+    } catch (err) { resumen = { error: err.message }; }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({
+      version: VERSION,
+      commit: (process.env.RAILWAY_GIT_COMMIT_SHA || 'local').substring(0, 7),
+      arranque: tiempo.horaLocal(INICIO_MS),
+      hora_mexico: tiempo.horaLocal(Date.now()),
+      conectado: conectado,
+      grupos: { electricos: !!ID_ELECTRICOS, proyecto_bot: !!ID_PROYECTO_BOT, control: !!ID_CONTROL },
+      estado: resumen
+    }));
   }
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ status: conectado ? 'connected' : 'waiting_qr' }));
@@ -147,8 +171,7 @@ async function procesarConfirmar() {
   if (pendiente.tipo === 'asignar_turno') {
     await db.setPendiente(null);
     await timers.iniciarTimerConexion(pendiente.cargador_id, pendiente.nombre, pendiente.numero);
-    const finTimer = new Date(Date.now() + 15 * 60 * 1000)
-      .toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Mexico_City' });
+    const finTimer = tiempo.horaLocal(Date.now() + 15 * 60 * 1000);
     // Avisar al usuario en Eléctricos
     if (pendiente.numero) {
       await enviarElectricos(pendiente.nombre + ' @' + pendiente.numero + ' es tu turno, tienes 15 minutos para conectarte 🔌', pendiente.numero);
@@ -177,8 +200,7 @@ async function procesarUsuarioConecto(nombre, cajonHint) {
   await timers.iniciarTimerSesion(cargador.cajon);
 
   const msSesion  = c.vip ? db.MS_SESION_VIP : db.MS_SESION;
-  const finSesion = new Date(Date.now() + msSesion)
-    .toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Mexico_City' });
+  const finSesion = tiempo.horaLocal(Date.now() + msSesion);
 
   await enviarProyectoBot('✅ *' + nombre + ' conectado* | Termina a las: ' + finSesion);
 }
@@ -224,8 +246,7 @@ async function procesarEsperar() {
   if (!cargador) { await enviarProyectoBot('⚠️ No hay timer de conexión activo para extender.'); return; }
 
   await timers.extenderTimerConexion(cargador.cajon);
-  const finTimer = new Date(Date.now() + 15 * 60 * 1000)
-    .toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Mexico_City' });
+  const finTimer = tiempo.horaLocal(Date.now() + 15 * 60 * 1000);
   await enviarProyectoBot('⏳ *Extendido 15 min para ' + cargador.usuario_actual + '*\nNuevo límite: ' + finTimer);
 }
 
@@ -315,8 +336,7 @@ async function _ejecutarConexion(cajon, nombre, numero, esMañana) {
   const estado = db.getEstado();
   const c = estado.cargadores[cajon];
   const msSesion = c && c.vip ? db.MS_SESION_VIP : db.MS_SESION;
-  const finSesion = new Date(Date.now() + msSesion)
-    .toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Mexico_City' });
+  const finSesion = tiempo.horaLocal(Date.now() + msSesion);
   const filaActual = db.getEstado().fila;
   let msgFila = '';
   if (filaActual.length) {
@@ -330,11 +350,7 @@ async function _ejecutarConexion(cajon, nombre, numero, esMañana) {
 }
 
 function _horaISO700() {
-  const ahora = new Date();
-  const mex = new Date(ahora.toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
-  mex.setHours(7, 0, 0, 0);
-  const offset = ahora.getTime() - new Date(ahora.toLocaleString('en-US', { timeZone: 'America/Mexico_City' })).getTime();
-  return new Date(mex.getTime() + offset).toISOString();
+  return tiempo.horaStrAISO('7:00');
 }
 
 // FLUJO: DESCONEXIÓN MANUAL [Nombre] se desconectó
@@ -392,6 +408,13 @@ async function procesarProyectoBot(texto, numeroFrom, nombreFrom) {
 
   // Reiniciar
   if (tl === 'reiniciar estado') {
+    reinicioPendienteHasta = Date.now() + 120000;
+    await enviarProyectoBot('⚠️ Esto borra la fila y libera TODOS los cajones. Para confirmar escribe *confirmar reinicio* en los próximos 2 minutos.');
+    return;
+  }
+  if (tl === 'confirmar reinicio') {
+    if (Date.now() > reinicioPendienteHasta) { await enviarProyectoBot('No hay un reinicio pendiente. Escribe *reiniciar estado* primero.'); return; }
+    reinicioPendienteHasta = 0;
     const estadoActual = db.getEstado();
     for (const cajon in estadoActual.cargadores) {
       timers.cancelarTimerConexion(cajon);
@@ -640,8 +663,7 @@ async function procesarConexionAyudante(r) {
   const estado = db.getEstado();
   const c = estado.cargadores[String(r.cajon)];
   const msSesion = c && c.vip ? db.MS_SESION_VIP : db.MS_SESION;
-  const finSesion = new Date(Date.now() + msSesion)
-    .toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Mexico_City' });
+  const finSesion = tiempo.horaLocal(Date.now() + msSesion);
 
   if (numero) {
     await enviarElectricos(r.nombre + ' @' + numero + ' ✅ quedaste conectado hasta las ' + finSesion, numero);
@@ -676,13 +698,7 @@ async function procesarDesconexionAyudante(cajon) {
 }
 
 function _horaDesdeStr(horaStr) {
-  const m = horaStr.match(/(\d{1,2}):(\d{2})/);
-  if (!m) return null;
-  const ahora = new Date();
-  const mex = new Date(ahora.toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
-  mex.setHours(parseInt(m[1]), parseInt(m[2]), 0, 0);
-  const offset = ahora.getTime() - new Date(ahora.toLocaleString('en-US', { timeZone: 'America/Mexico_City' })).getTime();
-  return new Date(mex.getTime() + offset).toISOString();
+  return tiempo.horaStrAISO(horaStr);
 }
 
 // PROCESAR PRIVADO
@@ -732,7 +748,7 @@ async function iniciarBot() {
     if (connection === 'open') {
       conectado = true; qrActual = null;
       console.log('Bot conectado');
-      setTimeout(function() { detectarGrupos(sock); }, 2000);
+      setTimeout(function() { detectarGrupos(sock, true); }, 2000);
     }
   });
   sock.ev.on('creds.update', saveCreds);
@@ -769,7 +785,12 @@ async function iniciarBot() {
   sock.ev.on('groups.update', async function() { await detectarGrupos(sock); });
 }
 
-async function detectarGrupos(sock) {
+async function detectarGrupos(sock, forzar) {
+  const ahora = Date.now();
+  if (_gruposEnCurso) return;
+  if (!forzar && ahora - _gruposUltimo < 60000) return; // cooldown 60 s (evita rate-overlimit)
+  _gruposEnCurso = true;
+  _gruposUltimo = ahora;
   try {
     const grupos = await sock.groupFetchAllParticipating();
     for (const id in grupos) {
@@ -780,20 +801,15 @@ async function detectarGrupos(sock) {
     }
     if (!ID_ELECTRICOS)   console.log('Grupo "' + GRUPO_ELECTRICOS + '" no encontrado');
     if (!ID_PROYECTO_BOT) console.log('Grupo "' + GRUPO_PROYECTO_BOT + '" no encontrado');
-  } catch (e) { console.log('[detectarGrupos]', e.message); }
+  } catch (e) {
+    console.log('[detectarGrupos]', e.message);
+    if (/rate-overlimit/i.test(e.message)) _gruposUltimo = Date.now() + 240000; // castigo: ~5 min sin reintentar
+  } finally { _gruposEnCurso = false; }
 }
 
 // REINICIO AUTOMÁTICO A MEDIANOCHE HORA MÉXICO
 function programarReinicioNocturno() {
-  const ahora = new Date();
-  // Calcular siguiente medianoche en México (UTC-6)
-  const ahoraMex = new Date(ahora.toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
-  const manana = new Date(ahoraMex);
-  manana.setDate(manana.getDate() + 1);
-  manana.setHours(0, 0, 0, 0);
-  const offset = ahora.getTime() - ahoraMex.getTime();
-  const medianoche = new Date(manana.getTime() + offset);
-  const msHastaMedianoche = medianoche.getTime() - ahora.getTime();
+  const msHastaMedianoche = tiempo.msHastaMedianoche();
 
   console.log('[reinicio] Próximo reinicio nocturno en ' + Math.round(msHastaMedianoche / 60000) + ' minutos');
 
