@@ -48,6 +48,20 @@ function horaStrAISO(horaStr) {
   return new Date(msDeHoyMex(parseInt(m[1], 10), parseInt(m[2], 10))).toISOString();
 }
 
+// Horario laboral: el ayudante escribe horas en 12 h sin am/pm ("1:22", "4:22").
+// 7-12 → mañana/mediodía tal cual; 1-6 → tarde (+12); 0 y 13-23 → tal cual.
+function horaLaboral24(h) {
+  h = parseInt(h, 10);
+  return (h >= 1 && h <= 6) ? h + 12 : h;
+}
+
+// "1:22" → ISO de hoy en México, interpretando con horario laboral (1:22 = 13:22)
+function horaLaboralAISO(horaStr) {
+  const m = String(horaStr || '').match(/(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  return new Date(msDeHoyMex(horaLaboral24(m[1]), parseInt(m[2], 10))).toISOString();
+}
+
 // Milisegundos hasta la próxima medianoche de México
 function msHastaMedianoche() {
   const p = partesMex(Date.now());
@@ -67,4 +81,4 @@ function fechaMex(ms) {
   return p.y + '-' + String(p.mo).padStart(2, '0') + '-' + String(p.d).padStart(2, '0');
 }
 
-module.exports = { TZ, ahoraMs, ahoraISO, horaLocal, partesMex, msDeHoyMex, horaStrAISO, msHastaMedianoche, diaSemanaMex, fechaMex };
+module.exports = { TZ, ahoraMs, ahoraISO, horaLocal, partesMex, msDeHoyMex, horaStrAISO, horaLaboral24, horaLaboralAISO, msHastaMedianoche, diaSemanaMex, fechaMex };

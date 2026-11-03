@@ -30,7 +30,7 @@ let conectado       = false;
 let sockRef         = null;
 let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion;
 
-const VERSION = 'etapa0-4';
+const VERSION = 'etapa0-5';
 const AUTH_DIR = process.env.AUTH_DIR || 'auth_info';
 const INICIO_MS = Date.now();
 let reinicioPendienteHasta = 0;
@@ -701,7 +701,7 @@ async function procesarDesconexionAyudante(cajon) {
 }
 
 function _horaDesdeStr(horaStr) {
-  return tiempo.horaStrAISO(horaStr);
+  return tiempo.horaLaboralAISO(horaStr);
 }
 
 // PROCESAR PRIVADO

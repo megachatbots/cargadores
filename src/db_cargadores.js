@@ -418,7 +418,7 @@ function _horaLocal(iso) {
 }
 
 function _parsearHoraHoy(horaStr) {
-  const iso = tiempo.horaStrAISO(horaStr);
+  const iso = tiempo.horaLaboralAISO(horaStr);
   return iso ? new Date(iso) : null;
 }
 

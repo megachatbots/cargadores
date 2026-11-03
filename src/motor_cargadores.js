@@ -62,6 +62,38 @@ async function parsearComandoAdmin(texto, nombreRemitente) {
   }
 }
 
+
+// RANGO DE HORAS: "9:35-12:35", "1:22 A 4:22", "8:28-4-28", "7:25 al 10:25"
+const RE_RANGO = /(\d{1,2})[:.](\d{2})\s*(?:[-–—]|\ba\b|\bal\b|\bhasta\b)\s*(\d{1,2})\s*[:.\-]\s*(\d{2})/i;
+// PLACAS: 5-8 caracteres alfanuméricos con al menos una letra y un dígito
+const RE_PLACAS = /\b(?=[A-Z0-9]*\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{5,8}\b/;
+
+function parsearBloqueOcupado(lineas) {
+  let horaInicio = null, horaFin = null;
+  const limpias = [];
+  for (let l of lineas) {
+    const m = l.match(RE_RANGO);
+    if (m) {
+      horaInicio = m[1] + ':' + m[2];
+      horaFin    = m[3] + ':' + m[4];
+      l = l.replace(RE_RANGO, ' ');
+    }
+    l = l.replace(/\s+antes de.*$/i, ' ').replace(/\s+/g, ' ').trim();
+    if (l) limpias.push(l);
+  }
+  const nombre = limpias[0] || '?';
+  const resto = limpias.slice(1).join(' ');
+  let placas = null, marca = null;
+  const mp = resto.toUpperCase().match(RE_PLACAS);
+  if (mp) {
+    placas = mp[0];
+    marca = resto.replace(new RegExp(mp[0], 'i'), ' ').replace(/\s+/g, ' ').trim() || null;
+  } else {
+    marca = resto || null;
+  }
+  return { nombre, horaInicio: horaInicio || '7:00', horaFin, marca, placas };
+}
+
 // PARSER REPORTE MATUTINO (regex, sin AI)
 // Formato:
 // Cajón 41
@@ -97,21 +129,9 @@ function parsearReporteMatutino(texto) {
       continue;
     }
 
-    // Ocupado: "Nombre HH:MM-HH:MM" o "Nombre antes de las 7:00"
-    const lineaNombre = lineas[1];
-    const mHora = lineaNombre.match(/(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}[:\-]\d{2})/);
-    const nombre = lineaNombre
-      .replace(/\s+\d{1,2}:\d{2}.*/,'')
-      .replace(/\s+antes de.*/i,'')
-      .trim();
-
-    // Si no hay rango de horas, asumir que conectó antes de las 7:00
-    const horaInicio = mHora ? mHora[1] : '7:00';
-    const horaFin    = mHora ? mHora[2].replace('-',':') : null;
-    const marca      = lineas[2] || null;
-    const placas     = lineas[3] || null;
-
-    items.push({ cajon, ocupado: true, nombre, horaInicio, horaFin, marca, placas });
+    // Ocupado. Acepta: "Nombre 9:35-12:35" en una línea, o Nombre / placas+marca / "1:22 A 4:22" en líneas separadas
+    const b = parsearBloqueOcupado(lineas.slice(1));
+    items.push({ cajon, ocupado: true, nombre: b.nombre, horaInicio: b.horaInicio, horaFin: b.horaFin, marca: b.marca, placas: b.placas });
   }
 
   return items.length ? items : null;
@@ -146,4 +166,4 @@ function parsearAyudanteLibre(texto) {
   return null;
 }
 
-module.exports = { detectarSolicitud, parsearComandoAdmin, parsearReporteMatutino, esReporteMatutino, prefiltroCargador, parsearAyudanteConexion, parsearAyudanteLibre };
+module.exports = { parsearBloqueOcupado, detectarSolicitud, parsearComandoAdmin, parsearReporteMatutino, esReporteMatutino, prefiltroCargador, parsearAyudanteConexion, parsearAyudanteLibre };
