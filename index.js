@@ -28,9 +28,9 @@ const recordatoriosDesconexion = {};
 let qrActual        = null;
 let conectado       = false;
 let sockRef         = null;
-let makeWASocket, useMultiFileAuthState, DisconnectReason;
+let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion;
 
-const VERSION = 'etapa0-1';
+const VERSION = 'etapa0-2';
 const INICIO_MS = Date.now();
 let reinicioPendienteHasta = 0;
 let _gruposUltimo = 0, _gruposEnCurso = false;
@@ -730,7 +730,14 @@ async function procesarPrivado(chat, texto, numeroFrom) {
 async function iniciarBot() {
   console.log('[BAILEYS] Iniciando...');
   const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-  const waVersion = [2, 3000, 1040125391];
+  let waVersion = [2, 3000, 1040125391]; // respaldo si no se puede consultar la última
+  try {
+    if (fetchLatestBaileysVersion) {
+      const r = await fetchLatestBaileysVersion();
+      if (r && Array.isArray(r.version)) waVersion = r.version;
+    }
+  } catch (e) { console.log('[BAILEYS] No pude consultar la versión de WhatsApp Web, uso respaldo:', e.message); }
+  console.log('[BAILEYS] Versión WA: ' + waVersion.join('.'));
   const sock = makeWASocket({ version: waVersion, auth: state, logger: pino({ level: 'silent' }), browser: ['Mac OS', 'Safari', '10.15.7'] });
   sockRef = sock;
   timers.setEnviarFn(enviarProyectoBot);
@@ -841,6 +848,7 @@ async function arrancar() {
     makeWASocket          = baileys.default || baileys.makeWASocket;
     useMultiFileAuthState = baileys.useMultiFileAuthState;
     DisconnectReason      = baileys.DisconnectReason;
+    fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion;
     await db.inicializar();
     await timers.reactivarTimers();
     programarReinicioNocturno();
