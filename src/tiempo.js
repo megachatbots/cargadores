@@ -69,6 +69,13 @@ function msHastaMedianoche() {
   return (manana - offsetMex(manana)) - Date.now();
 }
 
+// ¿Estamos dentro del horario permitido? (hora de inicio inclusive, fin exclusive; opcional solo lunes a viernes)
+function dentroDeHorario(horaIni, horaFin, soloLV) {
+  const p = partesMex(Date.now());
+  if (soloLV) { const d = diaSemanaMex(); if (d === 0 || d === 6) return false; }
+  return p.h >= horaIni && p.h < horaFin;
+}
+
 // Día de la semana en México: 0=domingo … 6=sábado
 function diaSemanaMex() {
   const p = partesMex(Date.now());
@@ -81,4 +88,4 @@ function fechaMex(ms) {
   return p.y + '-' + String(p.mo).padStart(2, '0') + '-' + String(p.d).padStart(2, '0');
 }
 
-module.exports = { TZ, ahoraMs, ahoraISO, horaLocal, partesMex, msDeHoyMex, horaStrAISO, horaLaboral24, horaLaboralAISO, msHastaMedianoche, diaSemanaMex, fechaMex };
+module.exports = { TZ, ahoraMs, ahoraISO, horaLocal, partesMex, msDeHoyMex, horaStrAISO, horaLaboral24, horaLaboralAISO, dentroDeHorario, msHastaMedianoche, diaSemanaMex, fechaMex };

@@ -2,7 +2,8 @@
 // Devuelve una lista de eventos:
 //   {tipo:'conecta', cajon, nombre, horaInicio, horaFin, marca, placas, nombreDudoso}
 //   {tipo:'libre', cajones:[...]}
-//   {tipo:'desconectan', nombres:[...]}
+//   {tipo:'recordar', nombres:[...]}        (pide recordatorio: "se tiene que desconectar X")
+//   {tipo:'desconectaron', nombres:[...]}   (confirma desconexión: "Se desconectan X")
 //   {tipo:'disponibles', n}
 //   {tipo:'reporte'}            (≥2 bloques "Cajón N": lo procesa el cargador de estado inicial)
 const { parsearBloqueOcupado } = require('./motor_cargadores');
@@ -27,24 +28,31 @@ function nombreDudoso(nombre) {
   return false;
 }
 
-// ── "Se desconectan\nA\nB" / "se tiene que desconectar X" / "pedir a X que se desconecte"
-function parsearDesconectan(t) {
-  let cuerpo = null;
-  let m = t.match(/^\s*se\s+(?:tiene[n]?\s+que\s+)?desconect(?:a|an|ar|e|en)\b[ \t]*[:\-]?[ \t]*([\s\S]*)$/i);
-  if (m) cuerpo = m[1];
-  if (cuerpo === null) {
-    m = t.match(/^\s*desconect(?:ar|en|e)\s+a\s+([\s\S]+)$/i);
-    if (m) cuerpo = m[1];
-  }
-  if (cuerpo === null) {
-    m = t.match(/^\s*pedir\s+(?:a\s+)?([\s\S]+?)\s+que\s+se\s+desconect/i);
-    if (m) cuerpo = m[1];
-  }
-  if (cuerpo === null) return null;
-  const nombres = cuerpo.split(/\n|,|;|\s+y\s+/i)
+// Lista de nombres a partir de un cuerpo de texto (una por línea, o separados por coma / "y")
+function listaNombres(cuerpo) {
+  return cuerpo.split(/\n|,|;|\s+y\s+/i)
     .map(function(x) { return x.replace(/^\s*(?:usuarios?|a)\s+/i, '').trim(); })
     .filter(function(x) { return x.length >= 2; });
-  return nombres.length ? { tipo: 'desconectan', nombres: nombres } : null;
+}
+
+// ── RECORDATORIO (pide que el bot recuerde a alguien que debe desconectarse):
+//    "se tiene que desconectar X", "desconecten a X", "pedir a X que se desconecte"
+function parsearRecordar(t) {
+  let m = t.match(/^\s*se\s+tiene[n]?\s+que\s+desconect(?:ar|arse)\b[ \t]*[:\-]?[ \t]*([\s\S]*)$/i);
+  if (!m) m = t.match(/^\s*(?:favor\s+de\s+)?desconect(?:ar|en|e)\s+a\s+([\s\S]+)$/i);
+  if (!m) m = t.match(/^\s*pedir\s+(?:a\s+)?([\s\S]+?)\s+que\s+se\s+desconect/i);
+  if (!m) return null;
+  const nombres = listaNombres(m[1]);
+  return nombres.length ? { tipo: 'recordar', nombres: nombres } : null;
+}
+
+// ── CONFIRMACIÓN (el ayudante avisa que YA se desconectan / desconectaron):
+//    "Se desconectan\nA\nB", "Se desconecta\n\nC", "Se desconectó X"
+function parsearDesconectaron(t) {
+  const m = t.match(/^\s*se\s+desconect(?:a|an|ó|o|aron)\b[ \t]*[:\-]?[ \t]*([\s\S]*)$/i);
+  if (!m) return null;
+  const nombres = listaNombres(m[1]);
+  return nombres.length ? { tipo: 'desconectaron', nombres: nombres } : null;
 }
 
 // ── "2 lugares disponibles"
@@ -103,13 +111,39 @@ function parsearConexiones(t) {
 
 function parsearMensajeAyudante(texto) {
   const t = String(texto || '').replace(/\r/g, '');
-  const d = parsearDesconectan(t);
+  const r = parsearRecordar(t);
+  if (r) return [r];
+  const d = parsearDesconectaron(t);
   if (d) return [d];
   const disp = parsearDisponibles(t);
   if (disp) return [disp];
   const libres = parsearLibres(t);
   if (libres.length) return [{ tipo: 'libre', cajones: libres }];
   return parsearConexiones(t);
+}
+
+// Distancia de edición (Levenshtein) para tolerar errores de ortografía: "Dominges" ~ "Dominguez"
+function distancia(a, b) {
+  const m = a.length, n = b.length;
+  if (!m) return n; if (!n) return m;
+  let prev = [], cur = [];
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+// Tokens parecidos: iguales, prefijo (≥3) o con 1 error (≥5 letras) / 2 errores (≥8 letras)
+function tokenParecido(x, y) {
+  if (x === y) return true;
+  if (x.length >= 3 && y.length >= 3 && (y.indexOf(x) === 0 || x.indexOf(y) === 0)) return true;
+  const m = Math.min(x.length, y.length);
+  const tol = m >= 8 ? 2 : (m >= 5 ? 1 : 0);
+  return tol > 0 && distancia(x, y) <= tol;
 }
 
 // ── Búsqueda tolerante de nombres: sin acentos, sin importar el orden, nombre parcial.
@@ -126,7 +160,7 @@ function buscarPorNombre(buscado, candidatos) {
     const corto = tb.length <= tc.length ? tb : tc;
     const largo = tb.length <= tc.length ? tc : tb;
     const cubre = corto.every(function(x) {
-      return largo.some(function(y) { return y === x || (x.length >= 3 && y.length >= 3 && (y.indexOf(x) === 0 || x.indexOf(y) === 0)); });
+      return largo.some(function(y) { return tokenParecido(x, y); });
     });
     if (cubre) parciales.push(c);
   });

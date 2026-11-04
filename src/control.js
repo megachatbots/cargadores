@@ -65,7 +65,7 @@ function crear(deps) {
   function detenerIntervalo() { if (intervalo) { clearInterval(intervalo); intervalo = null; } }
 
   async function iniciarRecordatorios(personas) {
-    personas.forEach(function(p) { p.enviados = 1; pendientes[ayudante.normalizar(p.nombre)] = p; });
+    personas.forEach(function(p) { p.enviados = 1; if (!p.sinCajon) pendientes[ayudante.normalizar(p.nombre)] = p; });   // sinCajon: un solo envío
     await enviarRecordatorio(personas);
     for (const p of personas) { if (p.max && p.cajon) await db.marcarRecordatorios(p.cajon, 1); }
     if (!intervalo) intervalo = setInterval(function() { tick().catch(function(e) { console.log('[control] tick:', e.message); }); }, MS_RECORDATORIO);
@@ -129,40 +129,62 @@ function crear(deps) {
     return est.fila.filter(function(u) { return !conTurno[u.numero]; });
   }
 
-  async function libre(ev) {
-    const yaLibres = [], liberados = [];
-    let ultimoPendiente = null;
-    const llamados = {};   // personas ya avisadas en este mismo mensaje
-    for (const cajon of ev.cajones) {
-      const est = db.getEstado();
-      const c = est.cargadores[cajon];
-      if (!c || (!c.ocupado && !(c.timer_conexion && c.timer_conexion.activo))) { yaLibres.push(cajon); continue; }
-      if (c.usuario_actual) cancelarRecordatorio(c.usuario_actual);
-      timers.cancelarTimerConexion(cajon);
-      timers.cancelarTimerSesion(cajon);
-      await db.liberarCajon(cajon);
-      liberados.push(cajon);
-
-      const sig = siguientesSinTurno().find(function(u) { return !llamados[u.numero]; });
-      if (sig && sig.numero) {
-        await electricos(sig.nombre + ' @' + sig.numero + ' ya hay un lugar disponible para conectarte 🔌', sig.numero);
-        llamados[sig.numero] = true;
-        ultimoPendiente = { tipo: 'asignar_turno', cargador_id: cajon, nombre: sig.nombre, numero: sig.numero };
-        await db.setPendiente(ultimoPendiente);
-      }
-      console.log('[CONTROL] Desconexión cajón ' + cajon);
+  // Libera un cajón y llama a la siguiente persona de la fila (sin repetir personas dentro del mismo mensaje)
+  async function liberarYLlamar(cajon, llamados) {
+    const c = db.getEstado().cargadores[cajon];
+    if (!c || (!c.ocupado && !(c.timer_conexion && c.timer_conexion.activo))) return false;
+    if (c.usuario_actual) cancelarRecordatorio(c.usuario_actual);
+    timers.cancelarTimerConexion(cajon);
+    timers.cancelarTimerSesion(cajon);
+    await db.liberarCajon(cajon);
+    // Cajones VIP (46/50): no se ofrecen a la fila general mientras un admin no los abra
+    if (db.CAJONES_VIP.has(cajon) && !db.vipAbierto()) { console.log('[CONTROL] Cajón VIP ' + cajon + ' liberado; no se llama a la fila'); return true; }
+    const sig = siguientesSinTurno().find(function(u) { return !llamados[u.numero]; });
+    if (sig && sig.numero) {
+      await electricos(sig.nombre + ' @' + sig.numero + ' ya hay un lugar disponible para conectarte 🔌', sig.numero);
+      llamados[sig.numero] = true;
+      await db.setPendiente({ tipo: 'asignar_turno', cargador_id: cajon, nombre: sig.nombre, numero: sig.numero });
     }
-    if (yaLibres.length && !liberados.length) {
-      console.log('[CONTROL] Cajón(es) ' + yaLibres.join(', ') + ' ya estaban libres');
+    console.log('[CONTROL] Desconexión cajón ' + cajon);
+    return true;
+  }
+
+  // "41 libre", "41 y 42 libres"
+  async function libre(ev) {
+    const llamados = {};
+    for (const cajon of ev.cajones) {
+      if (!(await liberarYLlamar(cajon, llamados))) console.log('[CONTROL] Cajón ' + cajon + ' ya estaba libre');
     }
   }
 
-  async function desconectan(ev) {
+  // "Se desconectan / Nombre1 / Nombre2": el ayudante CONFIRMA que ya se desconectaron → se liberan sus cajones
+  async function desconectaron(ev) {
+    const ocup = db.ocupantes();
+    const llamados = {}, liberados = [], noEncontrados = [], ambiguos = [], vistos = {};
+    for (const n of ev.nombres) {
+      cancelarRecordatorio(n);                       // si había recordatorios para ese nombre, se acaban
+      const m = ayudante.buscarPorNombre(n, ocup);
+      if (m.length === 1) {
+        if (vistos[m[0].id]) continue;
+        vistos[m[0].id] = true;
+        if (await liberarYLlamar(m[0].id, llamados)) liberados.push('cajón ' + m[0].id + ' (' + m[0].nombre + ')');
+      } else if (m.length === 0) noEncontrados.push(n);
+      else ambiguos.push(n + ' → ' + m.map(function(x) { return x.nombre + ' (cajón ' + x.id + ')'; }).join(' / '));
+    }
+    const avisos = [];
+    if (liberados.length) avisos.push('✅ Liberado por reporte del ayudante: ' + liberados.join(', ') + '.');
+    if (noEncontrados.length) avisos.push('ℹ️ No encontré en los cajones a: ' + noEncontrados.join(', ') + ' (no hice nada con ellos).');
+    if (ambiguos.length) avisos.push('⚠️ Nombre ambiguo, no liberé:\n' + ambiguos.join('\n') + '\nUsa *N libre* en Control.');
+    if (avisos.length) await proyectoBot(avisos.join('\n'));
+  }
+
+  // "se tiene que desconectar X": el ayudante PIDE recordar. Máximo 3 recordatorios y luego alerta a admins.
+  async function recordar(ev) {
     const ocup = db.ocupantes();
     const personas = [], noEncontrados = [], ambiguos = [];
     ev.nombres.forEach(function(n) {
       const m = ayudante.buscarPorNombre(n, ocup);
-      if (m.length === 1) personas.push({ nombre: m[0].nombre, numero: m[0].numero, cajon: m[0].id });
+      if (m.length === 1) personas.push({ nombre: m[0].nombre, numero: m[0].numero, cajon: m[0].id, max: MAX_RECORDATORIOS });
       else if (m.length === 0) noEncontrados.push(n);
       else ambiguos.push(n + ' → ' + m.map(function(x) { return x.nombre + ' (cajón ' + x.id + ')'; }).join(' / '));
     });
@@ -174,7 +196,7 @@ function crear(deps) {
   }
 
   async function disponibles(ev) {
-    const libres = db.numLibres();
+    const libres = db.numLibresTotal();   // Control cuenta todos los cajones, VIP incluidos
     if (ev.n === libres) return;
     const ahora = tiempo.ahoraMs();
     if (ahora - ultimoAvisoDisponibles < MS_AVISO_DISPONIBLES) return;
@@ -233,7 +255,8 @@ function crear(deps) {
       if (ev.tipo === 'reporte')          await deps.procesarReporte(textoMsg);
       else if (ev.tipo === 'conecta')     await conecta(ev);
       else if (ev.tipo === 'libre')       await libre(ev);
-      else if (ev.tipo === 'desconectan') await desconectan(ev);
+      else if (ev.tipo === 'recordar')       await recordar(ev);
+      else if (ev.tipo === 'desconectaron')  await desconectaron(ev);
       else if (ev.tipo === 'disponibles') await disponibles(ev);
     }
     return true;

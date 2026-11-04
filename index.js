@@ -18,6 +18,11 @@ const control = require('./src/control').crear({
   procesarReporte: function(t) { return procesarEstadoInicial(t); }
 });
 timers.setOnSesionCumplida(control.sesionCumplida);
+const listaCtl = require('./src/lista').crear({
+  db: db, tiempo: tiempo,
+  enviarElectricos: function(t, m) { return enviarElectricos(t, m); },
+  listo: function() { return !!(sockRef && ID_ELECTRICOS); }
+});
 
 const GRUPO_ELECTRICOS   = process.env.GRUPO_ELECTRICOS    || 'Eléctricos';
 const GRUPO_PROYECTO_BOT = process.env.GRUPO_PROYECTO_BOT  || 'Proyecto Bot';
@@ -36,7 +41,24 @@ let conectado       = false;
 let sockRef         = null;
 let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion;
 
-const VERSION = 'etapa2a-1';
+const VERSION = 'etapa1b-1';
+// Miembros de Eléctricos (solo a ellos se les menciona). null = aún no cargado → no se filtra.
+let miembrosElectricos = null;
+const _noMiembroAvisado = new Set();
+function _digitos(x) { return String(x).replace(/@.*$/, '').replace(/:\d+$/, ''); }
+async function refrescarMiembros() {
+  if (!sockRef || !ID_ELECTRICOS) return;
+  try {
+    const md = await sockRef.groupMetadata(ID_ELECTRICOS);
+    const s = new Set();
+    (md.participants || []).forEach(function(p) { [p.id, p.lid, p.phoneNumber, p.jid].forEach(function(x) { if (x) s.add(_digitos(x)); }); });
+    if (s.size) { miembrosElectricos = s; console.log('[miembros] Eléctricos: ' + s.size + ' ids'); }
+  } catch (e) { console.log('[miembros] error:', e.message); }
+}
+// Horario permitido para escribir en Eléctricos (L-V). Variable HORARIO_ELECTRICOS="7-20" para cambiarlo.
+const HORARIO = (process.env.HORARIO_ELECTRICOS || '7-20').split('-').map(Number);
+let silencio = false;
+let _ultimoAvisoSilencio = 0;
 const AUTH_DIR = process.env.AUTH_DIR || 'auth_info';
 const INICIO_MS = Date.now();
 let reinicioPendienteHasta = 0;
@@ -76,6 +98,11 @@ const server = http.createServer(async function(req, res) {
       hora_mexico: tiempo.horaLocal(Date.now()),
       conectado: conectado,
       persistencia_db: db.persistencia(),
+      silencio: silencio,
+      lista_abierta: db.listaAbierta(),
+      vip_abierto: db.vipAbierto(),
+      miembros_electricos: miembrosElectricos ? miembrosElectricos.size : null,
+      horario_ok: tiempo.dentroDeHorario(HORARIO[0], HORARIO[1], true),
       auth_dir: AUTH_DIR,
       grupos: { electricos: !!ID_ELECTRICOS, proyecto_bot: !!ID_PROYECTO_BOT, control: !!ID_CONTROL },
       estado: resumen
@@ -98,6 +125,28 @@ async function enviarProyectoBot(texto) {
 }
 
 async function enviarElectricos(texto, mencionNumero) {
+  // Guardas: interruptor "silencio" y horario permitido. Fuera de eso, nada sale a Eléctricos.
+  const horarioOk = tiempo.dentroDeHorario(HORARIO[0], HORARIO[1], true);
+  if (silencio || !horarioOk) {
+    console.log('[enviarElectricos] BLOQUEADO (' + (silencio ? 'silencio' : 'fuera de horario') + '): ' + texto.substring(0, 70));
+    if (Date.now() - _ultimoAvisoSilencio > 3 * 60 * 60 * 1000) {
+      _ultimoAvisoSilencio = Date.now();
+      await enviarProyectoBot('🔕 No envié a Eléctricos (' + (silencio ? 'modo silencio' : 'fuera de horario ' + HORARIO[0] + ':00-' + HORARIO[1] + ':00 L-V') + '). Primer mensaje bloqueado: «' + texto.substring(0, 80) + '»');
+    }
+    return;
+  }
+  // Solo se menciona a miembros de Eléctricos
+  const _m = !mencionNumero ? [] : (Array.isArray(mencionNumero) ? mencionNumero : [mencionNumero]);
+  if (miembrosElectricos && _m.length) {
+    const fuera = _m.filter(function(n) { return !miembrosElectricos.has(_digitos(n)); });
+    if (fuera.length) {
+      console.log('[enviarElectricos] BLOQUEADO (no miembro): ' + fuera.join(','));
+      const nuevos = fuera.filter(function(n) { return !_noMiembroAvisado.has(String(n)); });
+      nuevos.forEach(function(n) { _noMiembroAvisado.add(String(n)); });
+      if (nuevos.length) await enviarProyectoBot('🚫 No envié a Eléctricos: ' + nuevos.join(', ') + ' no aparece(n) en el grupo. Mensaje: «' + texto.substring(0, 80) + '»');
+      return;
+    }
+  }
   // Siempre leer ID_ELECTRICOS en el momento de enviar (no en el momento de crear la función)
   if (!ID_ELECTRICOS) {
     console.log('[enviarElectricos] ID_ELECTRICOS no disponible — redetectando');
@@ -308,8 +357,17 @@ async function procesarEstadoInicial(texto) {
 async function procesarElectricos(texto, numeroFrom, nombreFrom) {
   // Ignorar mensajes de admins en Eléctricos
   if (ADMIN_IDS.includes(numeroFrom)) return;
+  if (miembrosElectricos) miembrosElectricos.add(_digitos(numeroFrom));   // quien escribe es miembro
+  // Lista cerrada (antes de las 8:00, fin de semana o cerrada por admin): las solicitudes se omiten
+  if (!db.listaAbierta()) { console.log('[ELÉCTRICOS] Lista cerrada: mensaje omitido (' + nombreFrom + ')'); return; }
   const r = await motor.detectarSolicitud(texto, nombreFrom);
   if (!r.es_solicitud) return;
+  // No se toman en cuenta horarios especiales: la lista es del momento
+  if (motor.horaEspecial(texto)) {
+    await enviarElectricos('Hola ' + nombreFrom + ' @' + numeroFrom + ', la lista es del momento: escríbenos cuando estés listo para conectar 🙏', numeroFrom);
+    console.log('[ELÉCTRICOS] Solicitud con horario especial NO anotada: ' + nombreFrom);
+    return;
+  }
   await procesarSolicitud(nombreFrom, numeroFrom);
 }
 
@@ -390,6 +448,15 @@ async function procesarDesconexionManual(nombre) {
   await enviarProyectoBot(msg);
 }
 
+// Quitar de la fila por nombre (quitar a X / fuera X)
+async function quitarDeFila(nombre) {
+  const est = db.getEstado();
+  const u   = est.fila.find(function(x) { return x.nombre.toLowerCase().includes(nombre.toLowerCase()); });
+  if (!u) { await enviarProyectoBot('❌ "' + nombre + '" no está en la fila'); return; }
+  await db.quitarFila(u.numero);
+  await enviarProyectoBot('✅ ' + u.nombre + ' quitado de la fila');
+}
+
 // PROCESAR GRUPO PROYECTO BOT
 async function procesarProyectoBot(texto, numeroFrom, nombreFrom) {
   if (!ADMIN_IDS.includes(numeroFrom)) return;
@@ -411,9 +478,12 @@ async function procesarProyectoBot(texto, numeroFrom, nombreFrom) {
         '📊 *Consultas:*\n' +
         '• *fila* — ver lista de espera\n' +
         '• *estado* — ver cajones y fila\n' +
-        '• *quitar a [Nombre]* — sacar de la fila\n' +
+        '• *quitar a [Nombre]* o *fuera [Nombre]* — sacar de la fila\n' +
+        '• *abrir lista / cerrar lista* — abrir o cerrar la lista de espera (se abre sola a las 8:00 L-V)\n' +
+        '• *abrir vip / cerrar vip* — cajones 46 y 50 para la fila general\n' +
         '• *N es Nombre* — decir quién ocupa el cajón N\n' +
-        '• *N desde H:MM* — corregir la hora de conexión del cajón N\n\n' +
+        '• *N desde H:MM* — corregir la hora de conexión del cajón N\n' +
+        '• *silencio on / off* — cortar o reanudar los mensajes a Eléctricos\n\n' +
         '⚠️ *Emergencia:*\n' +
         '• *reiniciar estado* — borrar todo y empezar de cero');
     return;
@@ -435,6 +505,38 @@ async function procesarProyectoBot(texto, numeroFrom, nombreFrom) {
     }
     await db.reiniciar();
     await enviarProyectoBot('🔄 Estado reiniciado. Todos los cajones libres y fila vacía.');
+    return;
+  }
+
+  // Lista de espera y cajones VIP
+  if (tl === 'abrir lista' || tl === 'cerrar lista') {
+    if (tl === 'abrir lista') {
+      if (db.listaAbierta()) { await enviarProyectoBot('ℹ️ La lista ya está abierta.'); return; }
+      await listaCtl.abrir();
+      await enviarProyectoBot('✅ Lista abierta y mensaje de inicio enviado a Eléctricos.');
+    } else {
+      await listaCtl.cerrar();
+      await enviarProyectoBot('🔒 Lista cerrada. Las solicitudes se omiten hasta que escribas *abrir lista* (no se reabre sola hoy).');
+    }
+    return;
+  }
+  if (tl === 'abrir vip' || tl === 'cerrar vip') {
+    await db.setVip(tl === 'abrir vip');
+    await enviarProyectoBot(tl === 'abrir vip'
+      ? '⭐ Cajones 46 y 50 *abiertos* para la fila general (hasta medianoche o *cerrar vip*).'
+      : '⭐ Cajones 46 y 50 *cerrados* para la fila general (solo MD).');
+    return;
+  }
+  if (tl.startsWith('fuera ') && tl.length > 6) {
+    await quitarDeFila(texto.trim().slice(6).trim());
+    return;
+  }
+
+  // Interruptor de emergencia: corta todo lo que el bot manda a Eléctricos
+  if (tl === 'silencio on' || tl === 'silencio off') {
+    silencio = tl === 'silencio on';
+    await db.guardarSilencio(silencio);
+    await enviarProyectoBot(silencio ? '🔕 *Silencio ACTIVADO*: no enviaré nada a Eléctricos hasta que escribas *silencio off*.' : '🔔 *Silencio desactivado*: vuelvo a escribir en Eléctricos (dentro del horario permitido).');
     return;
   }
 
@@ -562,11 +664,7 @@ async function procesarProyectoBot(texto, numeroFrom, nombreFrom) {
     }
     case 'quitar_usuario': {
       if (!r.nombre) { await enviarProyectoBot('❌ Indica el nombre. Ej: "quitar a Juan"'); return; }
-      const est = db.getEstado();
-      const u   = est.fila.find(function(x) { return x.nombre.toLowerCase().includes(r.nombre.toLowerCase()); });
-      if (!u) { await enviarProyectoBot('❌ "' + r.nombre + '" no está en la fila'); return; }
-      await db.quitarFila(u.numero);
-      await enviarProyectoBot('✅ ' + u.nombre + ' quitado de la fila');
+      await quitarDeFila(r.nombre);
       break;
     }
     default: break;
@@ -687,6 +785,7 @@ async function iniciarBot() {
   });
 
   sock.ev.on('groups.update', async function() { await detectarGrupos(sock); });
+  sock.ev.on('group-participants.update', function() { refrescarMiembros(); });
 }
 
 // Resuelve UN grupo por su ID (llamada ligera; evita rate-overlimit de groupFetchAllParticipating)
@@ -707,7 +806,7 @@ async function resolverGrupo(sock, id) {
 }
 function asignarGrupo(id, subject) {
   const antes = ID_ELECTRICOS + '|' + ID_PROYECTO_BOT + '|' + ID_CONTROL;
-  if (subject === GRUPO_ELECTRICOS)   ID_ELECTRICOS   = id;
+  if (subject === GRUPO_ELECTRICOS)   { const _nuevo = ID_ELECTRICOS !== id; ID_ELECTRICOS = id; if (_nuevo) setTimeout(refrescarMiembros, 1000); }
   if (subject === GRUPO_PROYECTO_BOT) ID_PROYECTO_BOT = id;
   if (subject === GRUPO_CONTROL)      ID_CONTROL      = id;
   if (antes !== ID_ELECTRICOS + '|' + ID_PROYECTO_BOT + '|' + ID_CONTROL) {
@@ -783,7 +882,13 @@ async function arrancar() {
       console.log('[grupos] Cargados de Postgres: E=' + !!ID_ELECTRICOS + ' P=' + !!ID_PROYECTO_BOT + ' C=' + !!ID_CONTROL);
     } catch (e) { console.log('[grupos] no pude cargar:', e.message); }
     await timers.reactivarTimers();
+    try { silencio = await db.cargarSilencio(); } catch (e) { silencio = false; }
+    console.log('[arranque] silencio=' + silencio + ' horario=' + HORARIO.join('-'));
     control.reanudarRecordatorios();
+    refrescarMiembros();
+    setInterval(refrescarMiembros, 30 * 60 * 1000);
+    setInterval(function() { listaCtl.tick().catch(function(e) { console.log('[lista] tick error:', e.message); }); }, 60 * 1000);
+    listaCtl.tick().catch(function(e) { console.log('[lista] tick error:', e.message); });
     programarReinicioNocturno();
     await iniciarBot();
   } catch (e) { console.error('[ARRANQUE] ERROR FATAL:', e); }

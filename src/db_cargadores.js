@@ -63,7 +63,8 @@ function cajonVacio(cajon) {
 function estadoVacio() {
   const cargadores = {};
   for (const c of CAJONES) cargadores[c] = cajonVacio(c);
-  return { fila: [], lista_estatica: [], cargadores, proximoId: 1, pendiente: null };
+  return { fila: [], lista_estatica: [], cargadores, proximoId: 1, pendiente: null,
+    lista_abierta: false, vip_abierto: false, lista_dia: tiempo.fechaMex(Date.now()), lista_auto_hecho: false };
 }
 
 // INICIALIZACIÓN
@@ -74,6 +75,7 @@ async function inicializar() {
     estado = guardado;
     if (estado.pendiente === undefined) estado.pendiente = null;
     if (!estado.lista_estatica) estado.lista_estatica = [];
+    if (estado.lista_abierta === undefined) { estado.lista_abierta = false; estado.vip_abierto = false; estado.lista_dia = tiempo.fechaMex(Date.now()); estado.lista_auto_hecho = false; }
     // Migración: si los cargadores son array viejo (1-6), reiniciar
     if (Array.isArray(estado.cargadores)) {
       console.log('[DB_C] Migrando estado antiguo a cajones reales');
@@ -94,7 +96,10 @@ async function guardar(motivo) {
 }
 
 async function reiniciar() {
+  // Reinicio manual: conserva el estado de la lista del día (no la cierra ni la vuelve a anunciar)
+  const l = { a: estado.lista_abierta, v: estado.vip_abierto, d: estado.lista_dia, h: estado.lista_auto_hecho };
   estado = estadoVacio();
+  estado.lista_abierta = !!l.a; estado.vip_abierto = !!l.v; estado.lista_dia = l.d || estado.lista_dia; estado.lista_auto_hecho = !!l.h;
   await guardar('reinicio manual');
   return true;
 }
@@ -159,16 +164,32 @@ async function quitarFila(numero) {
 function primeroEnFila() { return estado.fila[0] || null; }
 
 // CARGADORES
+// Lista del día y cajones VIP
+function listaAbierta() { return !!estado.lista_abierta; }
+function vipAbierto() { return !!estado.vip_abierto; }
+async function setLista(v) { estado.lista_abierta = !!v; estado.lista_dia = tiempo.fechaMex(Date.now()); estado.lista_auto_hecho = true; await guardar('lista ' + (v ? 'abierta' : 'cerrada')); }
+async function setVip(v) { estado.vip_abierto = !!v; await guardar('vip ' + (v ? 'abierto' : 'cerrado')); }
+async function nuevoDiaLista(hoy) { estado.lista_dia = hoy; estado.lista_abierta = false; estado.vip_abierto = false; estado.lista_auto_hecho = false; await guardar('nuevo dia'); }
+// Cajones que cuentan para la fila general (VIP solo si un admin los abrió)
+function cajonesActivos() { return CAJONES.filter(function(c) { return !CAJONES_VIP.has(c) || estado.vip_abierto; }); }
+
 function cargadorLibre() {
-  for (const cajon of CAJONES) {
+  for (const cajon of cajonesActivos()) {
     const c = estado.cargadores[cajon];
     if (!c.ocupado && !c.timer_conexion.activo) return c;
   }
   return null;
 }
 
-function numLibres() {
+function numLibresTotal() {
   return CAJONES.filter(function(cajon) {
+    const c = estado.cargadores[cajon];
+    return !c.ocupado && !c.timer_conexion.activo;
+  }).length;
+}
+
+function numLibres() {
+  return cajonesActivos().filter(function(cajon) {
     const c = estado.cargadores[cajon];
     return !c.ocupado && !c.timer_conexion.activo;
   }).length;
@@ -308,6 +329,10 @@ async function renombrarOcupante(cajon, nombre) {
   return c;
 }
 
+// Interruptor "silencio": corta todo lo que sale a Eléctricos (persiste entre deploys)
+async function cargarSilencio() { return !!(await pgGet('silencio')); }
+async function guardarSilencio(v) { return pgSet('silencio', !!v); }
+
 // IDs de grupos de WhatsApp (persisten entre deploys)
 async function cargarGrupos() { return (await pgGet('grupos_ids')) || {}; }
 async function guardarGrupos(g) { return pgSet('grupos_ids', g); }
@@ -423,7 +448,7 @@ function getPendiente() { return estado.pendiente; }
 function tiempoEstimado(posicion) {
   const libres = numLibres();
   if (posicion <= libres) return 0;
-  return Math.ceil((posicion - libres) / NUM_CARGADORES) * 3;
+  return Math.ceil((posicion - libres) / cajonesActivos().length) * 3;
 }
 
 // RESÚMENES
@@ -465,7 +490,7 @@ function resumenCargadores() {
       txt += '🟢 Cajón ' + cajon + vipTag + ': Libre\n';
     }
   }
-  txt += '\n*' + numLibres() + '/' + NUM_CARGADORES + ' libres*';
+  txt += '\n*' + numLibres() + '/' + cajonesActivos().length + ' libres*' + (estado.vip_abierto ? ' (VIP abierto)' : ' (46 y 50 solo MD)');
   return txt;
 }
 
@@ -496,10 +521,10 @@ function _parsearHoraHoy(horaStr) {
 module.exports = {
   inicializar, getEstado, persistencia, guardar, reiniciar, reiniciarTodo,
   agregarFila, moverAlFinal, quitarFila, primeroEnFila,
-  cargadorLibre, numLibres, tiempoEstimado,
+  cargadorLibre, numLibres, numLibresTotal, tiempoEstimado, listaAbierta, vipAbierto, setLista, setVip, nuevoDiaLista, cajonesActivos,
   iniciarTimerConexion, extenderTimerConexion, confirmarConexion, liberarCajon,
   conectarUsuario, buscarCajonDeUsuario, buscarEnFila,
-  cargarEstadoInicial, ocupantes, renombrarOcupante, ajustarInicio, marcarTiempoCumplido, marcarRecordatorios, cargarGrupos, guardarGrupos,
+  cargarEstadoInicial, ocupantes, renombrarOcupante, ajustarInicio, marcarTiempoCumplido, marcarRecordatorios, cargarGrupos, guardarGrupos, cargarSilencio, guardarSilencio,
   setPendiente, getPendiente,
   resumenFila, resumenCargadores, resumenCompleto, resumenListaEstatica,
   anotarManual, buscarEnFilaTolerate,

@@ -41,6 +41,16 @@ function prefiltroCargador(texto) {
   return /cargar|turno|lugar|fila|anot|apunt|anex|agrega|cargador|espera|quiero|necesito|disponib|hay lugar|también|tambi[eé]n|considerar|lista/i.test(tl);
 }
 
+// ¿La solicitud pide un horario especial? ("a las 2", "después de comer", "más tarde", "mañana"...)
+// No se toman en cuenta horarios especiales: la lista es del momento.
+function horaEspecial(texto) {
+  const t = String(texto || '').toLowerCase();
+  return /\b(?:a|para|desde|hasta|despu[eé]s\s+de|antes\s+de|como\s+a)\s+las?\s+\d{1,2}\b/.test(t) ||
+    /\b\d{1,2}\s*:\s*\d{2}\b/.test(t) ||
+    /\b\d{1,2}\s*(?:am|pm|a\.m\.?|p\.m\.?|hrs?)\b/.test(t) ||
+    /\b(?:m[aá]s\s+tarde|al\s+rato|en\s+(?:una|un\s+par\s+de|dos|tres|\d+)\s+horas?|en\s+(?:media|\d+\s+min\w*)|despu[eé]s\s+de\s+(?:comer|la\s+comida|mi\s+junta|la\s+junta|salir)|al\s+salir|(?:en|por)\s+la\s+tarde|hoy\s+en\s+la\s+tarde|(?<!la\s)(?<!esta\s)(?<!por\s)ma[nñ]ana)\b/.test(t);
+}
+
 // DETECTAR SOLICITUD (AI)
 async function detectarSolicitud(texto, nombreRemitente) {
   if (!prefiltroCargador(texto)) return { es_solicitud: false };
@@ -168,4 +178,4 @@ function parsearAyudanteLibre(texto) {
   return null;
 }
 
-module.exports = { parsearBloqueOcupado, detectarSolicitud, parsearComandoAdmin, parsearReporteMatutino, esReporteMatutino, prefiltroCargador, parsearAyudanteConexion, parsearAyudanteLibre };
+module.exports = { horaEspecial, parsearBloqueOcupado, detectarSolicitud, parsearComandoAdmin, parsearReporteMatutino, esReporteMatutino, prefiltroCargador, parsearAyudanteConexion, parsearAyudanteLibre };

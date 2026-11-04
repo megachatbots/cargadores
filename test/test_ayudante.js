@@ -31,11 +31,11 @@ check('Cajón 41 libre / Cajón 42 libre (dos líneas)', j(ev('Cajón 41 libre\n
 check('"Cajón 46\\nLibre uso extendido" suelto no es libre', ev('Cajón 46\nLibre uso extendido').length === 0, j(ev('Cajón 46\nLibre uso extendido')));
 check('cajón inexistente (47) se ignora', ev('47 libre').length === 0);
 
-console.log('\nDesconectan (recordatorios)');
+console.log('\nDesconectaron (confirmación) vs recordar');
 e = ev('Se desconectan \nDavid Shelfeld \nFrancisco Antonello');
-check('Se desconectan / David Shelfeld / Francisco Antonello', e.length === 1 && e[0].tipo === 'desconectan' && j(e[0].nombres) === j(['David Shelfeld', 'Francisco Antonello']), j(e));
+check('Se desconectan / David Shelfeld / Francisco Antonello', e.length === 1 && e[0].tipo === 'desconectaron' && j(e[0].nombres) === j(['David Shelfeld', 'Francisco Antonello']), j(e));
 e = ev('se tiene que desconectar usuario Francisco Antonello');
-check('se tiene que desconectar usuario X', e.length === 1 && j(e[0].nombres) === j(['Francisco Antonello']), j(e));
+check('se tiene que desconectar usuario X', e.length === 1 && e[0].tipo === 'recordar' && j(e[0].nombres) === j(['Francisco Antonello']), j(e));
 e = ev('Se desconectan Ana y Luis');
 check('"Ana y Luis" en una línea → 2 nombres', e.length === 1 && e[0].nombres.length === 2, j(e));
 check('"apoyo para desconectar tu vehículo" NO es recordatorio', ev('@210706850914377 apoyo para desconectar tu vehículo por favor').length === 0);
@@ -55,6 +55,14 @@ check('parcial ambiguo: "Nancy" → 2', A.buscarPorNombre('Nancy', ocup).map(x =
 check('exacto gana: "Nancy López" → 44', A.buscarPorNombre('Nancy López', ocup).map(x => x.id).join() === '44');
 check('sin coincidencia: "Pedro"', A.buscarPorNombre('Pedro', ocup).length === 0);
 check('no confunde "Ana" con "Nancy"', A.buscarPorNombre('Ana', ocup).length === 0);
+
+console.log('\nBúsqueda con errores de ortografía (casos reales)');
+check('"Javier Dominges" encuentra "Javier Domínguez"', A.buscarPorNombre('Javier Dominges', [{ id: '1', nombre: 'Javier Domínguez' }]).length === 1);
+check('"Zamany Nieto" encuentra "Zamanny Nieto"', A.buscarPorNombre('Zamany Nieto', [{ id: '2', nombre: 'Zamanny Nieto' }]).length === 1);
+check('"Carlos Guadarrama" NO confunde con "Carlos Seghun"', A.buscarPorNombre('Carlos Guadarrama', [{ id: '3', nombre: 'Carlos Seghun' }]).length === 0);
+check('"Ale E" NO confunde con "Alejandra Espinosa"', A.buscarPorNombre('Ale E', [{ id: '4', nombre: 'Alejandra Espinosa' }]).length === 0);
+check('"Pablo" NO confunde con "Pamela"', A.buscarPorNombre('Pablo', [{ id: '5', nombre: 'Pamela Arestegui' }]).length === 0);
+check('"Gerardo Jurado" encuentra "Gérardo Jurado"', A.buscarPorNombre('Gerardo Jurado', [{ id: '6', nombre: 'Gérardo Jurado' }]).length === 1);
 
 console.log('\nResultado: ' + ok + '/' + (ok + fail) + ' ✅  ' + fail + ' ❌');
 process.exit(fail ? 1 : 0);
