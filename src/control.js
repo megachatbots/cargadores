@@ -10,6 +10,10 @@ function crear(deps) {
   const db = deps.db, timers = deps.timers, tiempo = deps.tiempo;
   const electricos = deps.enviarElectricos;     // (texto, menciones: string | string[] | null)
   const proyectoBot = deps.enviarProyectoBot;   // (texto)
+  // ¿Se puede escribir ahora en Eléctricos? (horario permitido y sin "silencio"). Si no, los recordatorios se PAUSAN.
+  const puedeElectricos = deps.puedeElectricos || function() { return true; };
+  // Aviso automático a admins: fuera de horario se junta en un resumen para las 7:00 (lo implementa index.js)
+  const avisoDiferible = deps.avisoDiferible || proyectoBot;
 
   // ── Recordatorio de desconexión (un solo mensaje para todos los pendientes, cada 15 min)
   const pendientes = {};          // clave normalizada → { nombre, numero, cajon }
@@ -25,10 +29,13 @@ function crear(deps) {
       ' por favor desconecten su vehículo, el tiempo de carga ha terminado 🙏';
   }
 
+  // Devuelve true solo si de verdad se mandó (fuera de horario / silencio no cuenta como enviado)
   async function enviarRecordatorio(personas) {
-    if (!personas.length) return;
+    if (!personas.length) return false;
+    if (!puedeElectricos()) return false;
     const menciones = personas.filter(function(p) { return p.numero; }).map(function(p) { return p.numero; });
     await electricos(texto(personas), menciones.length ? menciones : null);
+    return true;
   }
 
   function sigueConectado(p) {
@@ -36,6 +43,7 @@ function crear(deps) {
   }
 
   async function tick() {
+    if (!puedeElectricos()) return;   // pausa: no se envía, no se cuenta y no se alerta; se retoma al volver el horario
     const vigentes = [], alertas = [];
     for (const k of Object.keys(pendientes)) {
       const p = pendientes[k];
@@ -56,7 +64,7 @@ function crear(deps) {
       }
     }
     for (const p of alertas) {
-      await proyectoBot('🚨 *' + p.nombre + '* (cajón ' + p.cajon + ') sigue sin desconectarse tras ' + p.max + ' recordatorios. ' +
+      await avisoDiferible('🚨 *' + p.nombre + '* (cajón ' + p.cajon + ') sigue sin desconectarse tras ' + p.max + ' recordatorios. ' +
         'Pasen a revisar. Cuando se desconecte: *' + p.cajon + ' libre* en Control.');
     }
     if (!Object.keys(pendientes).length) detenerIntervalo();
@@ -65,11 +73,12 @@ function crear(deps) {
   function detenerIntervalo() { if (intervalo) { clearInterval(intervalo); intervalo = null; } }
 
   async function iniciarRecordatorios(personas) {
-    personas.forEach(function(p) { p.enviados = 1; if (!p.sinCajon) pendientes[ayudante.normalizar(p.nombre)] = p; });   // sinCajon: un solo envío
-    await enviarRecordatorio(personas);
-    for (const p of personas) { if (p.max && p.cajon) await db.marcarRecordatorios(p.cajon, 1); }
+    const enviado = await enviarRecordatorio(personas);
+    personas.forEach(function(p) { p.enviados = enviado ? 1 : 0; if (!p.sinCajon) pendientes[ayudante.normalizar(p.nombre)] = p; });   // sinCajon: un solo envío
+    if (enviado) { for (const p of personas) { if (p.max && p.cajon) await db.marcarRecordatorios(p.cajon, 1); } }
     if (!intervalo) intervalo = setInterval(function() { tick().catch(function(e) { console.log('[control] tick:', e.message); }); }, MS_RECORDATORIO);
-    console.log('[recordatorio] Iniciado para ' + personas.map(function(p) { return p.nombre; }).join(', '));
+    console.log('[recordatorio] ' + (enviado ? 'Iniciado' : 'En pausa (fuera de horario o silencio)') + ' para ' + personas.map(function(p) { return p.nombre; }).join(', '));
+    return enviado;
   }
 
   function cancelarRecordatorio(nombre) {
@@ -86,7 +95,7 @@ function crear(deps) {
     const previoNombre = previo && previo.ocupado ? previo.usuario_actual : null;
 
     const cand = ayudante.buscarPorNombre(ev.nombre, est.fila.map(function(u) { return { id: u.numero, nombre: u.nombre, numero: u.numero }; }));
-    const numero = cand.length === 1 ? cand[0].numero : null;
+    const numero = cand.length === 1 && !db.esManual(cand[0].numero) ? cand[0].numero : null;
 
     const horaInicio = ev.horaInicio ? tiempo.horaLaboralAISO(ev.horaInicio) : null;
     await db.conectarUsuario(cajon, ev.nombre, numero, horaInicio, { marca: ev.marca, placas: ev.placas });
@@ -141,7 +150,12 @@ function crear(deps) {
     if (db.CAJONES_VIP.has(cajon) && !db.vipAbierto()) { console.log('[CONTROL] Cajón VIP ' + cajon + ' liberado; no se llama a la fila'); return true; }
     const sig = siguientesSinTurno().find(function(u) { return !llamados[u.numero]; });
     if (sig && sig.numero) {
-      await electricos(sig.nombre + ' @' + sig.numero + ' ya hay un lugar disponible para conectarte 🔌', sig.numero);
+      if (db.esManual(sig.numero)) {
+        // anotado a mano: no tiene teléfono, no se menciona en Eléctricos
+        await proyectoBot('⚡ Cajón ' + cajon + ' libre: le toca a *' + sig.nombre + '* (anotado a mano, sin teléfono). Avísale tú.');
+      } else {
+        await electricos(sig.nombre + ' @' + sig.numero + ' ya hay un lugar disponible para conectarte 🔌', sig.numero);
+      }
       llamados[sig.numero] = true;
       await db.setPendiente({ tipo: 'asignar_turno', cargador_id: cajon, nombre: sig.nombre, numero: sig.numero });
     }
@@ -149,12 +163,31 @@ function crear(deps) {
     return true;
   }
 
-  // "41 libre", "41 y 42 libres"
+  // Para "59" sugiere el único cajón válido que difiere en un dígito y no venía ya en el mensaje ("50")
+  function sugerirCajon(n, yaEnMensaje) {
+    const cands = ayudante.CAJONES_VALIDOS.filter(function(v) {
+      if (yaEnMensaje.indexOf(v) !== -1) return false;
+      return (v[0] !== n[0] ? 1 : 0) + (v[1] !== n[1] ? 1 : 0) === 1;
+    });
+    return cands.length === 1 ? cands[0] : null;
+  }
+
+  // "41 libre", "41 y 42 libres": libera y responde en Proyecto Bot lo que hizo
   async function libre(ev) {
-    const llamados = {};
+    const llamados = {}, liberados = [], yaLibres = [], avisos = [];
     for (const cajon of ev.cajones) {
-      if (!(await liberarYLlamar(cajon, llamados))) console.log('[CONTROL] Cajón ' + cajon + ' ya estaba libre');
+      const previo = db.getEstado().cargadores[cajon];
+      const quien = previo && previo.usuario_actual ? previo.usuario_actual : null;
+      if (await liberarYLlamar(cajon, llamados)) liberados.push(cajon + (quien ? ' (' + quien + ')' : ''));
+      else { yaLibres.push(cajon); console.log('[CONTROL] Cajón ' + cajon + ' ya estaba libre'); }
     }
+    if (liberados.length) avisos.push('✅ Liberado' + (liberados.length > 1 ? 's' : '') + ' por reporte del ayudante: cajón ' + liberados.join(', ') + '.');
+    if (yaLibres.length) avisos.push('ℹ️ Ya estaba' + (yaLibres.length > 1 ? 'n' : '') + ' libre' + (yaLibres.length > 1 ? 's' : '') + ' en mi registro: ' + yaLibres.join(', ') + '.');
+    (ev.invalidos || []).forEach(function(n) {
+      const s = sugerirCajon(n, ev.cajones);
+      avisos.push('⚠️ No reconocí el cajón ' + n + ' (no existe).' + (s ? ' ¿Quisiste decir ' + s + '? Responde *' + s + ' libre* en Control para liberarlo.' : ' Revisa el mensaje del ayudante.'));
+    });
+    if (avisos.length) await proyectoBot(avisos.join('\n'));
   }
 
   // "Se desconectan / Nombre1 / Nombre2": el ayudante CONFIRMA que ya se desconectaron → se liberan sus cajones
@@ -207,10 +240,10 @@ function crear(deps) {
 
   // El timer de sesión llegó a 3 h (8 h VIP): recordatorio automático, el cajón sigue ocupado
   async function sesionCumplida(info) {
-    await iniciarRecordatorios([{ nombre: info.nombre, numero: info.numero, cajon: info.cajon, max: MAX_RECORDATORIOS }]);
+    const enviado = await iniciarRecordatorios([{ nombre: info.nombre, numero: info.numero, cajon: info.cajon, max: MAX_RECORDATORIOS }]);
     const espera = db.getEstado().fila.length;
-    await proyectoBot('⏰ *' + info.nombre + '* cumplió su tiempo en cajón ' + info.cajon + '. Sigue ocupado hasta que el ayudante reporte *' + info.cajon + ' libre*.\n' +
-      'Recordatorios: 1/' + MAX_RECORDATORIOS + ' enviado en Eléctricos' + (espera ? ' · En fila: ' + espera : '') + '.');
+    await avisoDiferible('⏰ *' + info.nombre + '* cumplió su tiempo en cajón ' + info.cajon + '. Sigue ocupado hasta que el ayudante reporte *' + info.cajon + ' libre*.\n' +
+      (enviado ? 'Recordatorios: 1/' + MAX_RECORDATORIOS + ' enviado en Eléctricos' : 'Recordatorios en pausa (fuera de horario o silencio): no se ha enviado nada') + (espera ? ' · En fila: ' + espera : '') + '.');
   }
 
   // Tras un reinicio del bot: retoma los recordatorios automáticos que quedaron a medias

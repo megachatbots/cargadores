@@ -129,18 +129,57 @@ async function agregarFila(numero, nombre) {
   return { ok: true, posicion: estado.fila.length, item };
 }
 
-// Agregar manualmente a la fila (admin) — sin número de teléfono
-async function anotarManual(nombre) {
+// Entradas manuales: no tienen teléfono (numero = 'manual_N'); nunca se mencionan en Eléctricos
+function esManual(numero) { return String(numero || '').indexOf('manual_') === 0; }
+
+// Primera posición (1-based) que se puede ocupar sin saltarse a quien ya tiene un llamado activo:
+// la persona del pendiente "asignar_turno" y quienes tienen timer de conexión activo conservan su lugar.
+function posicionMinima() {
+  const prot = {};
+  const p = estado.pendiente;
+  if (p && p.tipo === 'asignar_turno' && p.numero) prot[p.numero] = true;
+  for (const k in estado.cargadores) {
+    const c = estado.cargadores[k];
+    if (c.timer_conexion && c.timer_conexion.activo && c.numero_actual) prot[c.numero_actual] = true;
+  }
+  let max = -1;
+  estado.fila.forEach(function(u, i) { if (prot[u.numero]) max = i; });
+  return max + 2;
+}
+// Coloca `item` en la posición pedida (1-based), respetando llamados activos. Devuelve { posicion, ajustada }
+function _colocar(item, pos) {
+  if (!pos) { estado.fila.push(item); return { posicion: estado.fila.length, ajustada: false }; }
+  let q = Math.min(Math.max(pos, 1), estado.fila.length + 1);
+  const min = Math.min(posicionMinima(), estado.fila.length + 1);
+  let ajustada = false;
+  if (q < min) { q = min; ajustada = true; }
+  estado.fila.splice(q - 1, 0, item);
+  return { posicion: q, ajustada: ajustada };
+}
+
+// Agregar manualmente a la fila (admin) — sin número de teléfono. pos opcional (1 = el siguiente en ser llamado)
+async function anotarManual(nombre, pos) {
   const yaEsta = estado.fila.find(function(u) { return u.nombre.toLowerCase() === nombre.toLowerCase(); });
   if (yaEsta) return { ok: false, yaEsta: true, posicion: estado.fila.indexOf(yaEsta) + 1 };
   const id = 'manual_' + (estado.proximoId++);
   const hora = tiempo.ahoraISO();
   const item = { id, numero: id, nombre, hora_solicitud: hora, manual: true };
-  estado.fila.push(item);
+  const r = _colocar(item, pos);
   if (!estado.lista_estatica) estado.lista_estatica = [];
   estado.lista_estatica.push({ nombre, numero: id, hora_solicitud: hora });
   await guardar('anotar manual ' + nombre);
-  return { ok: true, posicion: estado.fila.length, item };
+  return { ok: true, posicion: r.posicion, ajustada: r.ajustada, item };
+}
+
+// Mover a alguien que ya está en la fila a otra posición (admin)
+async function moverEnFila(numero, pos) {
+  const idx = estado.fila.findIndex(function(u) { return u.numero === numero; });
+  if (idx === -1) return null;
+  const desde = idx + 1;
+  const item = estado.fila.splice(idx, 1)[0];
+  const r = _colocar(item, pos);
+  await guardar('mover en fila');
+  return { posicion: r.posicion, ajustada: r.ajustada, desde: desde, item };
 }
 
 async function moverAlFinal(numero) {
@@ -311,7 +350,7 @@ function ocupantes() {
   const out = [];
   for (const cajon of CAJONES) {
     const c = estado.cargadores[cajon];
-    if (c.ocupado && c.usuario_actual) out.push({ id: cajon, nombre: c.usuario_actual, numero: c.numero_actual || null });
+    if (c.ocupado && c.usuario_actual) out.push({ id: cajon, nombre: c.usuario_actual, numero: (c.numero_actual && !esManual(c.numero_actual)) ? c.numero_actual : null });
   }
   return out;
 }
@@ -324,7 +363,7 @@ async function renombrarOcupante(cajon, nombre) {
   c.usuario_actual = nombre;
   const nl = nombre.toLowerCase();
   const enFila = estado.fila.find(function(u) { const ul = u.nombre.toLowerCase(); return ul === nl || ul.includes(nl) || nl.includes(ul); });
-  if (enFila) { c.numero_actual = enFila.numero; estado.fila = estado.fila.filter(function(u) { return u !== enFila; }); }
+  if (enFila) { c.numero_actual = esManual(enFila.numero) ? null : enFila.numero; estado.fila = estado.fila.filter(function(u) { return u !== enFila; }); }
   await guardar('renombrar ocupante ' + cajon);
   return c;
 }
@@ -527,6 +566,6 @@ module.exports = {
   cargarEstadoInicial, ocupantes, renombrarOcupante, ajustarInicio, marcarTiempoCumplido, marcarRecordatorios, cargarGrupos, guardarGrupos, cargarSilencio, guardarSilencio,
   setPendiente, getPendiente,
   resumenFila, resumenCargadores, resumenCompleto, resumenListaEstatica,
-  anotarManual, buscarEnFilaTolerate,
+  anotarManual, moverEnFila, posicionMinima, esManual, buscarEnFilaTolerate,
   MS_CONEXION, MS_SESION, MS_SESION_VIP, CAJONES, CAJONES_VIP
 };

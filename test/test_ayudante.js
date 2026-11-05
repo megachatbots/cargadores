@@ -5,6 +5,8 @@ let ok = 0, fail = 0;
 function check(d, c, x) { if (c) { ok++; console.log('  ✅ ' + d); } else { fail++; console.log('  ❌ ' + d + (x ? ' → ' + x : '')); } }
 const j = JSON.stringify;
 function ev(t) { return A.parsearMensajeAyudante(t); }
+// Libres: solo los cajones válidos (el evento 'libre' trae además `invalidos`)
+function lib(t) { const r = ev(t); return r.length === 1 && r[0].tipo === 'libre' ? r[0].cajones.join() : j(r.map(function(x) { return x.tipo; })); }
 
 console.log('\nConexiones');
 let e = ev('Se conecta \nCajón 41\nVíctor Ojeda \n33G579 Tesla \n1:22 A 4:22');
@@ -22,14 +24,34 @@ e = ev('Se conecta\nCajón 45\nCarlos Guadarrama\n83F796');
 check('Se conecta sin hora → horaInicio null', e.length === 1 && e[0].horaInicio === null && e[0].placas === '83F796', j(e));
 
 console.log('\nLibres');
-check('41 libre', j(ev('41 libre')) === j([{ tipo: 'libre', cajones: ['41'] }]), j(ev('41 libre')));
-check('44 libre Tania', j(ev('44 libre Tania')) === j([{ tipo: 'libre', cajones: ['44'] }]));
-check('Cajón 42 libre', j(ev('Cajón 42 libre')) === j([{ tipo: 'libre', cajones: ['42'] }]));
-check('1:50:42 PM Carlos: 42 libre Carlos', j(ev('1:50:42 PM Carlos: 42 libre Carlos')) === j([{ tipo: 'libre', cajones: ['42'] }]), j(ev('1:50:42 PM Carlos: 42 libre Carlos')));
-check('41 y 42 libres', j(ev('41 y 42 libres')) === j([{ tipo: 'libre', cajones: ['41', '42'] }]), j(ev('41 y 42 libres')));
-check('Cajón 41 libre / Cajón 42 libre (dos líneas)', j(ev('Cajón 41 libre\nCajón 42 libre')) === j([{ tipo: 'libre', cajones: ['41', '42'] }]), j(ev('Cajón 41 libre\nCajón 42 libre')));
+check('41 libre', lib('41 libre') === '41', lib('41 libre'));
+check('44 libre Tania', lib('44 libre Tania') === '44');
+check('Cajón 42 libre (mensaje real)', lib('Cajón 42 libre') === '42');
+check('1:50:42 PM Carlos: 42 libre Carlos', lib('1:50:42 PM Carlos: 42 libre Carlos') === '42', lib('1:50:42 PM Carlos: 42 libre Carlos'));
+check('41 y 42 libres', lib('41 y 42 libres') === '41,42', lib('41 y 42 libres'));
+check('Cajón 41 libre / Cajón 42 libre (dos líneas)', lib('Cajón 41 libre\nCajón 42 libre') === '41,42', lib('Cajón 41 libre\nCajón 42 libre'));
 check('"Cajón 46\\nLibre uso extendido" suelto no es libre', ev('Cajón 46\nLibre uso extendido').length === 0, j(ev('Cajón 46\nLibre uso extendido')));
-check('cajón inexistente (47) se ignora', ev('47 libre').length === 0);
+check('cajón inexistente (47): no libera nada, queda como inválido', (function() { const r = ev('47 libre'); return r.length === 1 && r[0].cajones.length === 0 && r[0].invalidos.join() === '47'; })(), j(ev('47 libre')));
+
+console.log('\nLibres: mensajes reales del ayudante y formatos nuevos');
+e = ev('Cajón 41,42,44,45,46,48,49,59 libres');
+check('real: "Cajón 41,42,44,45,46,48,49,59 libres" → 7 válidos y el 59 como inválido', e.length === 1 && e[0].cajones.join() === '41,42,44,45,46,48,49' && e[0].invalidos.join() === '59', j(e));
+check('Cajón 41,42,44,45,46,48,49,50 libres → los 8', lib('Cajón 41,42,44,45,46,48,49,50 libres') === '41,42,44,45,46,48,49,50');
+check('Libre 41', lib('Libre 41') === '41');
+check('Libre el 41', lib('Libre el 41') === '41');
+check('Libre cajón 41', lib('Libre cajón 41') === '41');
+check('Libres 41 y 42', lib('Libres 41 y 42') === '41,42');
+check('41: libre', lib('41: libre') === '41');
+check('Cajón 41 - libre', lib('Cajón 41 - libre') === '41');
+check('41 ya está libre', lib('41 ya está libre') === '41');
+check('41 quedó libre', lib('41 quedó libre') === '41');
+check('"libre 45 minutos" NO libera el 45', ev('queda libre 45 minutos').length === 0, j(ev('queda libre 45 minutos')));
+check('hora "12:45 libre" NO libera el 45', ev('12:45 libre').length === 0, j(ev('12:45 libre')));
+e = ev('Se desconecta Juan Pérez\n41 libre');
+check('"Se desconecta X" + "41 libre" → desconectaron(X) y libre(41)', e.length === 2 && e[0].tipo === 'desconectaron' && j(e[0].nombres) === j(['Juan Pérez']) && e[1].tipo === 'libre' && e[1].cajones.join() === '41', j(e));
+e = ev('Se desconecta\nJuan Pérez\nCajón 41 libre');
+check('misma cosa con salto de línea antes', e.length === 2 && j(e[0].nombres) === j(['Juan Pérez']) && e[1].cajones.join() === '41', j(e));
+check('"Cajón 46\\nLibre" (dos líneas) sigue sin ser libre', ev('Cajón 46\nLibre').length === 0);
 
 console.log('\nDesconectaron (confirmación) vs recordar');
 e = ev('Se desconectan \nDavid Shelfeld \nFrancisco Antonello');
@@ -63,6 +85,12 @@ check('"Carlos Guadarrama" NO confunde con "Carlos Seghun"', A.buscarPorNombre('
 check('"Ale E" NO confunde con "Alejandra Espinosa"', A.buscarPorNombre('Ale E', [{ id: '4', nombre: 'Alejandra Espinosa' }]).length === 0);
 check('"Pablo" NO confunde con "Pamela"', A.buscarPorNombre('Pablo', [{ id: '5', nombre: 'Pamela Arestegui' }]).length === 0);
 check('"Gerardo Jurado" encuentra "Gérardo Jurado"', A.buscarPorNombre('Gerardo Jurado', [{ id: '6', nombre: 'Gérardo Jurado' }]).length === 1);
+
+console.log('\nBúsqueda tolerante: caso real "papapimosh", letras intercambiadas y parte del nombre');
+check('"papapimosh" encuentra "Pasapimosh"', A.buscarPorNombre('papapimosh', [{ id: '1', nombre: 'Pasapimosh' }]).length === 1);
+check('"gerardo juardo" (letras intercambiadas) encuentra "Gerardo Jurado"', A.buscarPorNombre('gerardo juardo', [{ id: '1', nombre: 'Gerardo Jurado' }]).length === 1);
+check('"pimosh" (parte del nombre) encuentra "Pasapimosh"', A.buscarPorNombre('pimosh', [{ id: '1', nombre: 'Pasapimosh' }]).length === 1);
+check('"Pedro" sigue sin encontrar "Pasapimosh"', A.buscarPorNombre('Pedro', [{ id: '1', nombre: 'Pasapimosh' }]).length === 0);
 
 console.log('\nResultado: ' + ok + '/' + (ok + fail) + ' ✅  ' + fail + ' ❌');
 process.exit(fail ? 1 : 0);

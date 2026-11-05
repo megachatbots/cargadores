@@ -51,8 +51,21 @@ function parsearRecordar(t) {
 function parsearDesconectaron(t) {
   const m = t.match(/^\s*se\s+desconect(?:a|an|ó|o|aron)\b[ \t]*[:\-]?[ \t]*([\s\S]*)$/i);
   if (!m) return null;
-  const nombres = listaNombres(m[1]);
-  return nombres.length ? { tipo: 'desconectaron', nombres: nombres } : null;
+  // Líneas del cuerpo que en realidad dicen "41 libre": se separan de los nombres y generan un evento 'libre'
+  const lineas = m[1].split('\n'), restoNombres = [];
+  const libres = { validos: [], invalidos: [] };
+  lineas.forEach(function(l) {
+    const r = parsearLibres(l);
+    if (hayLibres(r)) {
+      r.validos.forEach(function(n) { if (libres.validos.indexOf(n) === -1) libres.validos.push(n); });
+      r.invalidos.forEach(function(n) { if (libres.invalidos.indexOf(n) === -1) libres.invalidos.push(n); });
+    } else restoNombres.push(l);
+  });
+  const nombres = listaNombres(restoNombres.join('\n'));
+  const out = [];
+  if (nombres.length) out.push({ tipo: 'desconectaron', nombres: nombres });
+  if (hayLibres(libres)) out.push({ tipo: 'libre', cajones: libres.validos, invalidos: libres.invalidos });
+  return out.length ? out : null;
 }
 
 // ── "2 lugares disponibles"
@@ -61,19 +74,30 @@ function parsearDisponibles(t) {
   return m ? { tipo: 'disponibles', n: parseInt(m[1], 10) } : null;
 }
 
-// ── "44 libre", "41 y 42 libres", "Cajón 42 libre", "1:50 PM Carlos: 42 libre Carlos"
-// Misma línea (no cruza saltos de línea, para no confundir "Cajón 46\nLibre uso extendido" del reporte)
+// ── "44 libre", "41 y 42 libres", "Cajón 42 libre", "Libre 41", "41: libre", "41 ya está libre", "Libres 41 y 42"
+// Cada línea por separado (no cruza saltos de línea, para no confundir "Cajón 46\nLibre uso extendido" del reporte).
+// Devuelve { validos: [...], invalidos: [...] }: invalidos = números 40-59 que no son cajón ("59" por "50").
+const LISTA_NUM = '\\d{2}(?:[ \\t]*(?:,|y|e)[ \\t]*\\d{2})*';
+const RE_LIBRE_DESPUES = new RegExp('(?<![\\d:])(' + LISTA_NUM + ')[ \\t]*[:\\-–]?[ \\t]*(?:ya[ \\t]+)?(?:est[aá]n?[ \\t]+|qued[oó][ \\t]+|quedaron[ \\t]+)?libres?\\b', 'gi');
+const RE_LIBRE_ANTES = new RegExp('\\blibres?\\b[ \\t]+(?:el[ \\t]+|los[ \\t]+)?(?:caj[oó]n(?:es)?[ \\t]+)?(' + LISTA_NUM + ')(?![\\d:]|[ \\t]*(?:min|hrs?\\b|horas?|h\\b|a\\.?m|p\\.?m|%))', 'gi');
 function parsearLibres(t) {
-  const encontrados = [];
-  const re = /(?<![\d:])(\d{2}(?:[ \t]*(?:,|y|e)[ \t]*\d{2})*)[ \t]+(?:est[aá]n?[ \t]+)?libres?\b/gi;
-  let m;
-  while ((m = re.exec(t)) !== null) {
-    (m[1].match(/\d{2}/g) || []).forEach(function(n) {
-      if (CAJONES_VALIDOS.indexOf(n) !== -1 && encontrados.indexOf(n) === -1) encontrados.push(n);
+  const validos = [], invalidos = [];
+  function tomar(txt) {
+    (txt.match(/\d{2}/g) || []).forEach(function(n) {
+      if (CAJONES_VALIDOS.indexOf(n) !== -1) { if (validos.indexOf(n) === -1) validos.push(n); }
+      else if (+n >= 40 && +n <= 59 && invalidos.indexOf(n) === -1) invalidos.push(n);
     });
   }
-  return encontrados;
+  String(t).split('\n').forEach(function(linea) {
+    let m;
+    RE_LIBRE_DESPUES.lastIndex = 0;
+    while ((m = RE_LIBRE_DESPUES.exec(linea)) !== null) tomar(m[1]);
+    RE_LIBRE_ANTES.lastIndex = 0;
+    while ((m = RE_LIBRE_ANTES.exec(linea)) !== null) tomar(m[1]);
+  });
+  return { validos: validos, invalidos: invalidos };
 }
+function hayLibres(l) { return l.validos.length > 0 || l.invalidos.length > 0; }
 
 // ── Conexiones: "Se conecta\nCajón 41\nNombre\nPlacas Marca\n1:22 A 4:22" (uno o varios bloques)
 function parsearConexiones(t) {
@@ -114,11 +138,11 @@ function parsearMensajeAyudante(texto) {
   const r = parsearRecordar(t);
   if (r) return [r];
   const d = parsearDesconectaron(t);
-  if (d) return [d];
+  if (d) return d;
   const disp = parsearDisponibles(t);
   if (disp) return [disp];
   const libres = parsearLibres(t);
-  if (libres.length) return [{ tipo: 'libre', cajones: libres }];
+  if (hayLibres(libres)) return [{ tipo: 'libre', cajones: libres.validos, invalidos: libres.invalidos }];
   return parsearConexiones(t);
 }
 
@@ -126,21 +150,24 @@ function parsearMensajeAyudante(texto) {
 function distancia(a, b) {
   const m = a.length, n = b.length;
   if (!m) return n; if (!n) return m;
-  let prev = [], cur = [];
-  for (let j = 0; j <= n; j++) prev[j] = j;
+  const d = [];
+  for (let i = 0; i <= m; i++) { d[i] = [i]; }
+  for (let j = 0; j <= n; j++) d[0][j] = j;
   for (let i = 1; i <= m; i++) {
-    cur = [i];
     for (let j = 1; j <= n; j++) {
-      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      // letras adyacentes intercambiadas ("juardo" ~ "jurado") cuentan como 1 error
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
     }
-    prev = cur;
   }
-  return prev[n];
+  return d[m][n];
 }
 // Tokens parecidos: iguales, prefijo (≥3) o con 1 error (≥5 letras) / 2 errores (≥8 letras)
 function tokenParecido(x, y) {
   if (x === y) return true;
   if (x.length >= 3 && y.length >= 3 && (y.indexOf(x) === 0 || x.indexOf(y) === 0)) return true;
+  // una parte del nombre dentro del otro ("pimosh" en "pasapimosh"), con ≥5 letras para no dar falsos positivos
+  if (x.length >= 5 && y.length >= 5 && (y.indexOf(x) !== -1 || x.indexOf(y) !== -1)) return true;
   const m = Math.min(x.length, y.length);
   const tol = m >= 8 ? 2 : (m >= 5 ? 1 : 0);
   return tol > 0 && distancia(x, y) <= tol;

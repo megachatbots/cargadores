@@ -2,12 +2,15 @@
 const db = require('./db_cargadores');
 
 // Wrappers dinámicos — se actualizan en cada reconexión de Baileys
-const _fns = { proyectoBot: null, electricos: null };
+const _fns = { proyectoBot: null, electricos: null, diferible: null };
 const _hooks = { sesionCumplida: null };
 function setOnSesionCumplida(fn) { _hooks.sesionCumplida = fn; }
 
 function setEnviarFn(fn) { _fns.proyectoBot = fn; }
 function setEnviarElectricosFn(fn) { _fns.electricos = fn; }
+// Aviso a admins que fuera de horario se junta en un resumen para las 7:00
+function setAvisoDiferibleFn(fn) { _fns.diferible = fn; }
+function _numeroReal(n) { return n && !db.esManual(n) ? n : null; }
 
 async function enviar(texto) {
   if (_fns.proyectoBot) await _fns.proyectoBot(texto);
@@ -119,12 +122,12 @@ async function avisarProximoVencimiento(cajon) {
   const c = estado.cargadores[cajon];
   if (!c || !c.ocupado) return;
   const nombre = c.usuario_actual;
-  const numero = c.numero_actual;
+  const numero = _numeroReal(c.numero_actual);
   console.log('[timers] Aviso 15min — cajón ' + cajon + ', ' + nombre);
   if (numero && _fns.electricos) {
     await enviarElectricosConMencion(nombre, numero, '@' + numero + ' faltan 15 minutos para desconectarte ⚡');
   } else {
-    await enviar('⏰ *Aviso:* ' + nombre + ' tiene 15 minutos antes de que expire su sesión en cajón ' + cajon + '.');
+    await (_fns.diferible || enviar)('⏰ *Aviso:* ' + nombre + ' tiene 15 minutos antes de que expire su sesión en cajón ' + cajon + '.');
   }
 }
 
@@ -134,7 +137,7 @@ async function notificarSesionTerminada(cajon) {
   const c = db.getEstado().cargadores[cajon];
   if (!c || !c.ocupado) return;
   const nombre = c.usuario_actual;
-  const numero = c.numero_actual;
+  const numero = _numeroReal(c.numero_actual);
   console.log('[timers] Tiempo cumplido — cajón ' + cajon + ', ' + nombre);
   // El cajón NO se libera: el ayudante es la fuente de verdad (N libre / "se desconectó").
   await db.marcarTiempoCumplido(cajon);
@@ -185,7 +188,7 @@ async function reactivarTimers() {
 }
 
 module.exports = {
-  setEnviarFn, setEnviarElectricosFn, setOnSesionCumplida,
+  setEnviarFn, setEnviarElectricosFn, setAvisoDiferibleFn, setOnSesionCumplida,
   iniciarTimerConexion, extenderTimerConexion, cancelarTimerConexion,
   iniciarTimerSesion, cancelarTimerSesion, reactivarTimerSesionCajon,
   preguntarConexion, avisarProximoVencimiento, notificarSesionTerminada,

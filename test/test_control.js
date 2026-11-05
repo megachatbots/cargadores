@@ -218,6 +218,35 @@ const cj = function(n) { return db.getEstado().cargadores[n]; };
   check('alerta 🚨 a admins', P.some(function(t) { return /🚨/.test(t); }), JSON.stringify(P));
   control._detener();
 
+  console.log('\nEntradas anotadas a mano (sin teléfono): no se mencionan en Eléctricos');
+  await reset();
+  await control.procesar('Se conecta\nCajón 42\nJuan Pérez\n11A111 BYD\n1:00 A 4:00');
+  await db.anotarManual('Pedro Manual');
+  limpiar();
+  await control.procesar('42 libre');
+  check('al liberar el 42, a Pedro (manual) NO se le menciona en Eléctricos', E.length === 0, JSON.stringify(E));
+  check('Proyecto Bot recibe "le toca a Pedro Manual … avísale tú"', P.some(function(t) { return /Pedro Manual/.test(t) && /Avísale tú/.test(t); }), JSON.stringify(P));
+  check('el resumen de "42 libre" también sale en Proyecto Bot', P.some(function(t) { return /Liberado.*42.*Juan Pérez/.test(t); }), JSON.stringify(P));
+  await control.procesar('Se conecta\nCajón 44\nPedro Manual\n22B222 Tesla\n2:00 A 5:00');
+  check('si conecta Pedro Manual: sale de la fila y queda sin número (no habrá @manual_N)', db.getEstado().fila.length === 0 && cj('44').numero_actual === null, JSON.stringify(cj('44')));
+
+  console.log('\nPausa de recordatorios fuera de horario (puedeElectricos = false)');
+  await reset();
+  let puede = false;
+  const control2 = crear({ db: db, timers: timers, tiempo: tiempo, puedeElectricos: function() { return puede; },
+    enviarElectricos: async function(t, m) { E.push({ t: t, m: m }); }, enviarProyectoBot: async function(t) { P.push(t); }, procesarReporte: async function() {} });
+  timers.setOnSesionCumplida(control2.sesionCumplida);
+  await control2.procesar('Se conecta\nCajón 41\nVíctor Ojeda\n33G579 Tesla\n11:00 A 2:00');
+  await avanzar(60 * MIN);
+  for (let i = 0; i < 8; i++) await avanzar(15 * MIN);
+  check('en pausa: no se envía ningún recordatorio ni se cuenta', E.length === 0 && (cj('41').recordatorios || 0) === 0, JSON.stringify({ E, rec: cj('41').recordatorios }));
+  check('en pausa: tampoco alerta 🚨', !P.some(function(t) { return /🚨/.test(t); }), JSON.stringify(P));
+  check('el aviso a admins dice la verdad (no afirma "1/3 enviado")', P.some(function(t) { return /en pausa/.test(t); }) && !P.some(function(t) { return /1\/3 enviado/.test(t); }), JSON.stringify(P));
+  puede = true; limpiar();
+  await avanzar(15 * MIN);
+  check('al volver el horario se retoma: sale el recordatorio 1', E.length === 1 && /desconecta/.test(E[0].t), JSON.stringify(E));
+  control2._detener();
+
   console.log('\nResultado: ' + ok + '/' + (ok + fail) + ' ✅  ' + fail + ' ❌');
   mock.timers.reset();
   process.exit(fail ? 1 : 0);
