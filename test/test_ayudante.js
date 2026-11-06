@@ -92,5 +92,36 @@ check('"gerardo juardo" (letras intercambiadas) encuentra "Gerardo Jurado"', A.b
 check('"pimosh" (parte del nombre) encuentra "Pasapimosh"', A.buscarPorNombre('pimosh', [{ id: '1', nombre: 'Pasapimosh' }]).length === 1);
 check('"Pedro" sigue sin encontrar "Pasapimosh"', A.buscarPorNombre('Pedro', [{ id: '1', nombre: 'Pasapimosh' }]).length === 0);
 
+console.log('\nDesconexión con el nombre primero (capturas reales del 5 nov: "Citlali Guzmán desconectada")');
+function desc(t) { const r = ev(t); return r.length && r[0].tipo === 'desconectaron' ? j(r[0].nombres) : j(r.map(function(x) { return x.tipo; })); }
+e = ev('Citlali Guzmán desconectada\n1 cargador disponible');
+check('REAL "Citlali Guzmán desconectada / 1 cargador disponible" → desconectaron + disponibles(1), en ese orden', e.length === 2 && e[0].tipo === 'desconectaron' && j(e[0].nombres) === j(['Citlali Guzmán']) && e[1].tipo === 'disponibles' && e[1].n === 1, j(e));
+check('"Citlali Guzmán desconectada"', desc('Citlali Guzmán desconectada') === j(['Citlali Guzmán']));
+check('"Citlali desconectado"', desc('Citlali desconectado') === j(['Citlali']));
+check('"Citlali se desconectó"', desc('Citlali se desconectó') === j(['Citlali']));
+check('"Citlali ya se desconectó"', desc('Citlali ya se desconectó') === j(['Citlali']));
+check('"Se desconectó Citlali" (antes no se reconocía: \\b y la ó)', desc('Se desconectó Citlali') === j(['Citlali']), desc('Se desconectó Citlali'));
+check('"Ya se desconectó Citlali"', desc('Ya se desconectó Citlali') === j(['Citlali']));
+check('"Roxana y Citlali desconectadas" → dos nombres', desc('Roxana y Citlali desconectadas') === j(['Roxana', 'Citlali']));
+check('una línea por persona + "2 cargadores disponibles"', (function() { const r = ev('Citlali Guzmán desconectada\nRoxana Ali desconectada\n2 cargadores disponibles'); return r.length === 2 && j(r[0].nombres) === j(['Citlali Guzmán', 'Roxana Ali']) && r[1].n === 2; })());
+check('"Citlali Guzmán desconectada a las 2:42"', desc('Citlali Guzmán desconectada a las 2:42') === j(['Citlali Guzmán']));
+check('"Pablo Perez desconectado, 45 libre" → desconectaron + libre(45)', (function() { const r = ev('Pablo Perez desconectado, 45 libre'); return r.length === 2 && r[1].tipo === 'libre' && r[1].cajones.join() === '45'; })());
+check('"Se desconecta Citlali" sigue funcionando', desc('Se desconecta Citlali') === j(['Citlali']));
+console.log('  — falsos positivos que NO deben liberar nada —');
+check('"Citlali no se ha desconectado"', ev('Citlali no se ha desconectado').length === 0, j(ev('Citlali no se ha desconectado')));
+check('"Falta que se desconecte Citlali"', ev('Falta que se desconecte Citlali').length === 0);
+check('"Roxana desconectó a Citlali" (otra persona la desconectó)', ev('Roxana desconectó a Citlali').length === 0);
+check('"Roxana desconectó el cargador"', ev('Roxana desconectó el cargador').length === 0);
+check('"Nadie se desconectó"', ev('Nadie se desconectó').length === 0, j(ev('Nadie se desconectó')));
+check('"Se desconectó" (sin nombre)', ev('Se desconectó').length === 0);
+check('un reporte de conexión no se toca', ev('Se conecta\nCajón 42\nPablo Perez\n04k546 Tesla\n3:45 A 6:45').length === 1 && ev('Se conecta\nCajón 42\nPablo Perez\n04k546 Tesla\n3:45 A 6:45')[0].tipo === 'conecta');
+
+console.log('\nRecordatorio con el nombre primero (captura: "Roxana se tiene que desconectar")');
+check('REAL "Roxana se tiene que desconectar" → recordar', (function() { const r = ev('Roxana se tiene que desconectar'); return r.length === 1 && r[0].tipo === 'recordar' && j(r[0].nombres) === j(['Roxana']); })(), j(ev('Roxana se tiene que desconectar')));
+check('REAL "Se tiene que desconectar Citlali" sigue funcionando', (function() { const r = ev('Se tiene que desconectar Citlali'); return r.length === 1 && r[0].tipo === 'recordar' && j(r[0].nombres) === j(['Citlali']); })());
+check('"Roxana y Nancy se tienen que desconectar"', (function() { const r = ev('Roxana y Nancy se tienen que desconectar'); return r.length === 1 && j(r[0].nombres) === j(['Roxana', 'Nancy']); })());
+check('dos líneas, una por persona', (function() { const r = ev('Roxana se tiene que desconectar\nCitlali se tiene que desconectar'); return r.length === 1 && j(r[0].nombres) === j(['Roxana', 'Citlali']); })());
+check('mezclado con texto ajeno NO se interpreta', ev('Roxana se tiene que desconectar\nMando a Pablo').length === 0);
+
 console.log('\nResultado: ' + ok + '/' + (ok + fail) + ' ✅  ' + fail + ' ❌');
 process.exit(fail ? 1 : 0);

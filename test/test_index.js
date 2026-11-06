@@ -129,6 +129,21 @@ const ultimo = function(a) { const l = en(a); return l[l.length - 1] || ''; };
   check('a las 7:00 sale UN resumen a Proyecto Bot con lo ocurrido de noche', resumen.length === 1 && /cumplió su tiempo/.test(resumen[0]) && /Reinicio automático/.test(resumen[0]), JSON.stringify(en('p')));
   check('y sigue sin salir nada a Eléctricos', en('e').length === 0, JSON.stringify(en('e')));
 
+  console.log('\n5) Caso real 5 nov: Citlali responde en Eléctricos y luego el ayudante escribe "Citlali Guzmán desconectada"');
+  await db.reiniciarTodo(); await db.setLista(true);
+  const CIT = '555000111222333';
+  await db.agregarFila(CIT, 'Citlali Guzmán');
+  await msg('c', OTRO, 'Se conecta\nCajón 45\nCitlali Guzmán\n11A111 BYD\n7:00 A 10:00');
+  await msg('c', OTRO, 'Se tiene que desconectar Citlali');
+  limpiar();
+  await msg('e', CIT, 'Ya me desconecté desde hace rato');
+  check('su respuesta en Eléctricos avisa a Proyecto Bot y pide confirmación del ayudante', /Citlali Guzmán.*respondió/.test(ultimo('p')) && /ayudante debe confirmarlo/.test(ultimo('p')), ultimo('p'));
+  check('el cajón 45 sigue ocupado (solo el ayudante libera)', db.getEstado().cargadores['45'].ocupado === true);
+  check('el bot no contesta nada en Eléctricos', en('e').length === 0, JSON.stringify(en('e')));
+  limpiar();
+  await msg('c', OTRO, 'Citlali Guzmán desconectada\n1 cargador disponible');
+  check('"Citlali Guzmán desconectada / 1 cargador disponible" libera el 45', db.getEstado().cargadores['45'].ocupado === false && /Liberado.*45.*Citlali Guzmán/.test(en('p').join('\n')), en('p').join(' | '));
+
   console.log('\nResultado: ' + ok + '/' + (ok + fail) + ' ✅  ' + fail + ' ❌');
   process.exit(fail ? 1 : 0);
 })().catch(function(e) { console.error('ERROR EN TEST', e); process.exit(2); });

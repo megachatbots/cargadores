@@ -87,6 +87,44 @@ function crear(deps) {
     if (!Object.keys(pendientes).length) detenerIntervalo();
   }
 
+  // ── Respuesta de un usuario en Eléctricos a su recordatorio ("ya me desconecté", "sí", "ok").
+  // El AYUDANTE es la fuente de verdad: esto NUNCA libera el cajón. Solo (a) detiene los recordatorios si sabemos
+  // con certeza quién es (coincide su número) y (b) avisa a Proyecto Bot para que el ayudante confirme.
+  // Si no tenemos su número (cargado por reporte), solo se avisa y NO se detienen recordatorios (podría ser otra persona).
+  function soloDigitos(x) { return String(x || '').replace(/@.*$/, '').replace(/\D/g, ''); }
+  const RE_YA_DESCONECTE = /\bdesconect(?:e|o|ado|ada)\b/;
+  const RE_NEGACION = /\b(no|aun|todavia|falta|cuando|despues|luego|en un rato)\b/;
+  const RE_ACUSE = /^(si+|ok|okay|vale|listo|lista|enterado|enterada|gracias|de acuerdo|ahorita|ya voy|voy|ya mero|ya)$/;
+  const avisadoPorNombre = {};   // cajón → true: un aviso por nombre de WhatsApp es suficiente
+  async function respuestaUsuario(numero, nombreWa, textoMsg) {
+    const t = ayudante.normalizar(textoMsg);
+    if (!t || t.split(' ').length > 8) return false;
+    const dice = RE_NEGACION.test(t) ? null : (RE_YA_DESCONECTE.test(t) ? 'desconectado' : (RE_ACUSE.test(t) ? 'acuse' : null));
+    if (!dice) return false;
+    const lista = Object.keys(pendientes).map(function(k) { return pendientes[k]; }).filter(function(p) { return p.cajon && !p.sinCajon; });
+    if (!lista.length) return false;
+    const dn = soloDigitos(numero);
+    let p = dn ? lista.find(function(x) { return x.numero && soloDigitos(x.numero) === dn; }) : null;
+    const citado = String(textoMsg).trim().substring(0, 60);
+    if (p) {
+      cancelarRecordatorio(p.nombre);
+      await db.marcarRecordatorios(p.cajon, (p.max || MAX_RECORDATORIOS) + 1);   // "ya atendido": no se reanudan tras un reinicio
+      await avisoDiferible('🔔 *' + p.nombre + '* (cajón ' + p.cajon + ') respondió en Eléctricos «' + citado + '». ' +
+        'Detuve sus recordatorios, pero el cajón sigue ocupado en mi registro: el ayudante debe confirmarlo con *Se desconecta ' + p.nombre + '* o *' + p.cajon + ' libre*. ' +
+        'Si en realidad no se ha desconectado, el ayudante puede pedirlo otra vez con *Se tiene que desconectar ' + p.nombre + '*.');
+      return true;
+    }
+    // Sin número registrado: solo si dice que YA se desconectó y su nombre de WhatsApp apunta a una única persona sin teléfono
+    if (dice !== 'desconectado' || !nombreWa) return false;
+    const sinNum = lista.filter(function(x) { return !x.numero; });
+    const m = ayudante.buscarPorNombre(nombreWa, sinNum.map(function(x) { return { id: x.cajon, nombre: x.nombre }; }));
+    if (m.length !== 1 || avisadoPorNombre[m[0].id]) return false;
+    avisadoPorNombre[m[0].id] = true;
+    await avisoDiferible('🔔 «' + nombreWa + '» escribió en Eléctricos «' + citado + '». Podría ser *' + m[0].nombre + '* (cajón ' + m[0].id + ', sin teléfono registrado), ' +
+      'por eso NO detuve sus recordatorios. El ayudante debe confirmar con *Se desconecta ' + m[0].nombre + '* o *' + m[0].id + ' libre*.');
+    return true;
+  }
+
   // ── Eventos
   async function conecta(ev) {
     const est = db.getEstado();
@@ -295,7 +333,7 @@ function crear(deps) {
     return true;
   }
 
-  return { procesar, ajustarInicio, sesionCumplida, reanudarRecordatorios, cancelarRecordatorio, _pendientes: pendientes, _detener: detenerIntervalo };
+  return { procesar, respuestaUsuario, ajustarInicio, sesionCumplida, reanudarRecordatorios, cancelarRecordatorio, _pendientes: pendientes, _detener: detenerIntervalo };
 }
 
 module.exports = { crear };

@@ -37,11 +37,38 @@ function listaNombres(cuerpo) {
 
 // ── RECORDATORIO (pide que el bot recuerde a alguien que debe desconectarse):
 //    "se tiene que desconectar X", "desconecten a X", "pedir a X que se desconecte"
+// Palabras que delatan que NO es un nombre ("Citlali no se ha desconectado", "falta que se desconecte X")
+const RE_NO_NOMBRE = /\b(nadie|ninguno|ninguna|todos|todas|alguien|se|ya|no|ha|han|he|aun|todavia|falta|faltan|cuando|si|que|favor|para|pedir|hay|cargador|cargadores|cajon|cajones|lugar|lugares|disponible|disponibles|libre|libres)\b/;
+// Lista de nombres válidos, o null si algún elemento no parece un nombre (≤5 palabras, sin dígitos ni palabras delatoras)
+function nombresValidos(txt) {
+  const ns = listaNombres(txt);
+  if (!ns.length) return null;
+  for (const n of ns) {
+    const norm = normalizar(n);
+    if (!norm || norm.split(' ').length > 5 || /\d/.test(norm) || RE_NO_NOMBRE.test(norm)) return null;
+  }
+  return ns;
+}
+// "Roxana se tiene que desconectar" / "Roxana y Nancy se tienen que desconectar" (todas las líneas deben ser así)
+const RE_NOMBRE_RECORDAR = /^\s*(.{2,80}?)\s+se\s+tiene[n]?\s+que\s+desconect(?:ar|arse)\s*[.!]*\s*$/i;
+function parsearRecordarNombrePrimero(t) {
+  const lineas = t.split('\n').filter(function(l) { return l.trim(); });
+  if (!lineas.length) return null;
+  const nombres = [];
+  for (const l of lineas) {
+    const m = l.match(RE_NOMBRE_RECORDAR);
+    const ns = m ? nombresValidos(m[1]) : null;
+    if (!ns) return null;
+    ns.forEach(function(n) { nombres.push(n); });
+  }
+  return { tipo: 'recordar', nombres: nombres };
+}
+
 function parsearRecordar(t) {
   let m = t.match(/^\s*se\s+tiene[n]?\s+que\s+desconect(?:ar|arse)\b[ \t]*[:\-]?[ \t]*([\s\S]*)$/i);
   if (!m) m = t.match(/^\s*(?:favor\s+de\s+)?desconect(?:ar|en|e)\s+a\s+([\s\S]+)$/i);
   if (!m) m = t.match(/^\s*pedir\s+(?:a\s+)?([\s\S]+?)\s+que\s+se\s+desconect/i);
-  if (!m) return null;
+  if (!m) return parsearRecordarNombrePrimero(t);
   const nombres = listaNombres(m[1]);
   return nombres.length ? { tipo: 'recordar', nombres: nombres } : null;
 }
@@ -49,7 +76,8 @@ function parsearRecordar(t) {
 // ── CONFIRMACIÓN (el ayudante avisa que YA se desconectan / desconectaron):
 //    "Se desconectan\nA\nB", "Se desconecta\n\nC", "Se desconectó X"
 function parsearDesconectaron(t) {
-  const m = t.match(/^\s*se\s+desconect(?:a|an|ó|o|aron)\b[ \t]*[:\-]?[ \t]*([\s\S]*)$/i);
+  // OJO: \b no considera letra a la «ó», por eso el fin de palabra se pide con (?![a-záéíóúñ])
+  const m = t.match(/^\s*(?:ya\s+)?se\s+desconect(?:aron|an|ó|o|a)(?![a-záéíóúñ])[ \t]*[:\-]?[ \t]*([\s\S]*)$/i);
   if (!m) return null;
   // Líneas del cuerpo que en realidad dicen "41 libre": se separan de los nombres y generan un evento 'libre'
   const lineas = m[1].split('\n'), restoNombres = [];
@@ -72,6 +100,29 @@ function parsearDesconectaron(t) {
 function parsearDisponibles(t) {
   const m = t.match(/(\d+)\s+(?:lugar(?:es)?|cajon(?:es)?|caj[oó]n(?:es)?|cargador(?:es)?|espacios?)\s+(?:disponibles?|libres?)/i);
   return m ? { tipo: 'disponibles', n: parseInt(m[1], 10) } : null;
+}
+
+// ── CONFIRMACIÓN con el nombre primero (una línea por persona, o "A y B"):
+//    "Citlali Guzmán desconectada", "Citlali se desconectó", "Citlali ya se desconectó", "Roxana y Citlali desconectadas"
+//    Puede venir con "1 cargador disponible" en el mismo mensaje (se procesa primero la desconexión y luego el conteo).
+//    Solo cuenta si la línea TERMINA en el verbo (o hora / "hace rato" / "ahorita"): "Roxana desconectó a Citlali" no cuenta.
+const RE_NOMBRE_DESCONECTO = /^\s*(?:ya\s+)?(.{2,80}?)\s+(?:ya\s+)?(?:se\s+)?desconect(?:ó|o|ada|ado|adas|ados|aron)(?:\s+(?:a\s+las\s+)?\d{1,2}[:.]\d{2}(?:\s*[ap]\.?m\.?)?|\s+hace\s+(?:rato|\d+\s+min\w*)|\s+ahorita)?\s*[.!]*\s*(?:[,;].*)?$/i;
+function parsearNombreDesconecto(t) {
+  // Un reporte de conexiones no se toca
+  if (/^\s*se\s+conectan?\b/i.test(t) || (t.match(/caj[oó]n\s+\d+/gi) || []).length >= 2) return null;
+  const nombres = [];
+  t.split('\n').forEach(function(l) {
+    const m = l.match(RE_NOMBRE_DESCONECTO);
+    const ns = m ? nombresValidos(m[1]) : null;
+    if (ns) ns.forEach(function(n) { if (nombres.indexOf(n) === -1) nombres.push(n); });
+  });
+  if (!nombres.length) return null;
+  const out = [{ tipo: 'desconectaron', nombres: nombres }];
+  const libres = parsearLibres(t);
+  if (hayLibres(libres)) out.push({ tipo: 'libre', cajones: libres.validos, invalidos: libres.invalidos });
+  const disp = parsearDisponibles(t);
+  if (disp) out.push(disp);
+  return out;
 }
 
 // ── "44 libre", "41 y 42 libres", "Cajón 42 libre", "Libre 41", "41: libre", "41 ya está libre", "Libres 41 y 42"
@@ -139,6 +190,8 @@ function parsearMensajeAyudante(texto) {
   if (r) return [r];
   const d = parsearDesconectaron(t);
   if (d) return d;
+  const nd = parsearNombreDesconecto(t);
+  if (nd) return nd;
   const disp = parsearDisponibles(t);
   if (disp) return [disp];
   const libres = parsearLibres(t);

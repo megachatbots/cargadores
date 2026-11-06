@@ -41,7 +41,7 @@ let conectado       = false;
 let sockRef         = null;
 let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion;
 
-const VERSION = 'etapa1c-1';
+const VERSION = 'etapa1c-2';
 // Miembros de Eléctricos (solo a ellos se les menciona). null = aún no cargado → no se filtra.
 let miembrosElectricos = null;
 const _noMiembroAvisado = new Set();
@@ -395,6 +395,8 @@ async function procesarElectricos(texto, numeroFrom, nombreFrom) {
   // Ignorar mensajes de admins en Eléctricos
   if (admin.esAdmin(numeroFrom)) return;
   if (miembrosElectricos) miembrosElectricos.add(_digitos(numeroFrom));   // quien escribe es miembro
+  // Respuesta a un recordatorio ("ya me desconecté", "sí"): detiene SUS recordatorios y avisa a Proyecto Bot; nunca libera el cajón
+  if (await control.respuestaUsuario(numeroFrom, nombreFrom, texto)) return;
   // Lista cerrada (antes de las 8:00, fin de semana o cerrada por admin): las solicitudes se omiten
   if (!db.listaAbierta()) { console.log('[ELÉCTRICOS] Lista cerrada: mensaje omitido (' + nombreFrom + ')'); return; }
   const r = await motor.detectarSolicitud(texto, nombreFrom);
