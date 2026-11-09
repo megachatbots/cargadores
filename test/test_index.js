@@ -9,6 +9,8 @@ mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: T0 });
 
 const ENV = { e: '1203630@g.us', p: '1203631@g.us', c: '1203632@g.us' };
 const ALMA = '999888777666555', ADM = '147699831668775', OTRO = '111222333444555';
+const AN = '777000111222331', BE = '777000111222332';   // Ana y Beto, miembros de Eléctricos
+let metaE = 0;                                          // cuántas veces se leyó la lista de miembros de Eléctricos
 const enviados = [];   // { a: 'p'|'e'|'c'|..., t, m }
 const handlers = {};
 const sock = {
@@ -21,7 +23,7 @@ const sock = {
       { id: ADM + '@lid', phoneNumber: '5215500000000@s.whatsapp.net' },
       { id: ALMA + '@lid', phoneNumber: '525522614857@s.whatsapp.net' },
       { id: OTRO + '@lid', phoneNumber: '5215599999999@s.whatsapp.net' }] };
-    if (id === ENV.e) return { subject: 'Eléctricos', participants: [{ id: '5215500000001@s.whatsapp.net' }] };
+    if (id === ENV.e) { metaE++; return { subject: 'Eléctricos', participants: [{ id: '5215500000001@s.whatsapp.net' }, { id: AN + '@lid' }, { id: BE + '@lid' }] }; }
     return { subject: 'Control de Cargadores 🚗', participants: [] };
   },
   sendMessage: async function(jid, c) {
@@ -143,6 +145,52 @@ const ultimo = function(a) { const l = en(a); return l[l.length - 1] || ''; };
   limpiar();
   await msg('c', OTRO, 'Citlali Guzmán desconectada\n1 cargador disponible');
   check('"Citlali Guzmán desconectada / 1 cargador disponible" libera el 45', db.getEstado().cargadores['45'].ocupado === false && /Liberado.*45.*Citlali Guzmán/.test(en('p').join('\n')), en('p').join(' | '));
+
+  console.log('\n6) "No puedo bajar" de punta a punta (etapa1c-3)');
+  await db.reiniciarTodo(); await db.setLista(true);
+  await db.agregarFila(AN, 'Ana Pérez'); await db.agregarFila(BE, 'Beto Ruiz');
+  await db.conectarUsuario('41', 'Víctor Ojeda', null);
+  await msg('c', OTRO, '41 libre');
+  check('el ayudante libera el 41 y se llama a Ana', en('e').some(function(t) { return /Ana Pérez/.test(t) && /lugar disponible/.test(t); }), JSON.stringify(en('e')));
+  limpiar();
+  await msg('e', AN, 'Ahorita no puedo, termino junta y bajo');
+  check('Ana queda al final de la fila', db.getEstado().fila.map(function(u) { return u.nombre; }).join() === 'Beto Ruiz,Ana Pérez', JSON.stringify(db.getEstado().fila));
+  check('se llama a Beto para el 41 y Ana recibe su nueva posición', en('e').some(function(t) { return /Beto Ruiz/.test(t) && /lugar disponible/.test(t); }) && en('e').some(function(t) { return /Ana Pérez/.test(t) && /posición 2/.test(t); }), JSON.stringify(en('e')));
+  check('Proyecto Bot informa y el pendiente es de Beto', /Ana Pérez/.test(ultimo('p')) && /Beto Ruiz/.test(ultimo('p')) && db.getPendiente().nombre === 'Beto Ruiz', ultimo('p'));
+  limpiar();
+  await db.setPendiente(null); await require('../src/timers').iniciarTimerConexion('41', 'Beto Ruiz', BE);   // equivale al "sí" del admin (que pasa por el clasificador IA, no disponible en pruebas)
+  check('con el turno de Beto en marcha (ventana de 15 min) su llamado sigue vigente', db.getLlamadoActivo(BE) && db.getLlamadoActivo(BE).fase === 'turno');
+  limpiar();
+  await msg('e', BE, 'me conecto en 10');
+  check('Beto promete 10 min en su ventana: solo aviso a Proyecto Bot, nadie se mueve', /Beto Ruiz/.test(ultimo('p')) && /10 min/.test(ultimo('p')) && db.getEstado().fila[0].nombre === 'Beto Ruiz' && en('e').length === 0, JSON.stringify(enviados));
+  limpiar();
+  await msg('e', AN, 'gracias');
+  check('un mensaje cualquiera de alguien sin llamado no cambia nada', en('p').length === 0 && db.getEstado().fila.length === 2);
+
+  console.log('\n7) Miembros de Eléctricos se recargan al abrir la conexión (antes quedaban en null hasta 30 min)');
+  const antes = metaE;
+  await handlers['connection.update']({ connection: 'open' });
+  await avanzar(6000);
+  check('al reconectar se vuelve a leer la lista de miembros', metaE > antes, 'lecturas ' + antes + ' → ' + metaE);
+
+  console.log('\n8) Comando "bitacora" (solo admin)');
+  limpiar();
+  await msg('p', OTRO, 'bitacora');
+  check('un no-admin no recibe nada', en('p').length === 0);
+  await msg('p', ALMA, 'bitacora');
+  check('un admin recibe la bitácora de la fila con altas/bajas y motivos', /Bitácora de la fila/.test(ultimo('p')) && /➕ Ana Pérez/.test(ultimo('p')), ultimo('p'));
+
+  console.log('\n9) "M es Miguel Angel" desde Proyecto Bot (etapa1c-5)');
+  await db.reiniciarTodo(); await db.setLista(true);
+  await db.agregarFila('5215500000091', 'My'); await db.agregarFila('5215500000092', 'M'); await db.agregarFila('5215500000093', 'Mj');
+  limpiar();
+  await msg('p', OTRO, 'M es Miguel Angel');
+  check('un no-admin no puede renombrar', db.getEstado().fila[1].nombre === 'M' && en('p').length === 0);
+  await msg('p', ALMA, 'M es Miguel Angel');
+  check('el admin renombra a "M" (posición 2) y el bot lo confirma', db.getEstado().fila.map(function(u) { return u.nombre; }).join() === 'My,Miguel Angel,Mj' && /Posición 2/.test(ultimo('p')), ultimo('p') + ' / ' + db.getEstado().fila.map(function(u) { return u.nombre; }));
+  limpiar();
+  await msg('p', ALMA, 'Hoy es un buen día');
+  check('una frase normal con "es" no toca la fila', db.getEstado().fila.length === 3 && db.getEstado().fila.map(function(u) { return u.nombre; }).join() === 'My,Miguel Angel,Mj');
 
   console.log('\nResultado: ' + ok + '/' + (ok + fail) + ' ✅  ' + fail + ' ❌');
   process.exit(fail ? 1 : 0);

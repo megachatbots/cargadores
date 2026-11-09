@@ -63,18 +63,21 @@ function cajonVacio(cajon) {
 function estadoVacio() {
   const cargadores = {};
   for (const c of CAJONES) cargadores[c] = cajonVacio(c);
-  return { fila: [], lista_estatica: [], cargadores, proximoId: 1, pendiente: null,
+  return { fila: [], lista_estatica: [], cargadores, proximoId: 1, pendiente: null, llamados: {}, bitacora_fila: [],
     lista_abierta: false, vip_abierto: false, lista_dia: tiempo.fechaMex(Date.now()), lista_auto_hecho: false };
 }
 
 // INICIALIZACIÓN
 async function inicializar() {
   await conectarPG();
+  try { aliasNombres = (await pgGet('alias_nombres')) || {}; } catch (e) { aliasNombres = {}; }
   const guardado = await pgGet('estado_cargadores');
   if (guardado) {
     estado = guardado;
     if (estado.pendiente === undefined) estado.pendiente = null;
     if (!estado.lista_estatica) estado.lista_estatica = [];
+    if (!estado.llamados) estado.llamados = {};
+    if (!estado.bitacora_fila) estado.bitacora_fila = [];
     if (estado.lista_abierta === undefined) { estado.lista_abierta = false; estado.vip_abierto = false; estado.lista_dia = tiempo.fechaMex(Date.now()); estado.lista_auto_hecho = false; }
     // Migración: si los cargadores son array viejo (1-6), reiniciar
     if (Array.isArray(estado.cargadores)) {
@@ -117,8 +120,9 @@ function persistencia() { return !!pgClient; }
 async function agregarFila(numero, nombre) {
   const yaEsta = estado.fila.find(function(u) { return u.numero === numero; });
   if (yaEsta) return { ok: false, yaEsta: true, posicion: estado.fila.indexOf(yaEsta) + 1 };
-  const item = { id: estado.proximoId++, numero, nombre: nombre || numero, hora_solicitud: tiempo.ahoraISO() };
+  const item = { id: estado.proximoId++, numero, nombre: aliasNombres[numero] || nombre || numero, hora_solicitud: tiempo.ahoraISO() };
   estado.fila.push(item);
+  _bit('alta', item, 'solicitud #' + estado.fila.length);
   // Registrar en lista estática (no se modifica después)
   if (!estado.lista_estatica) estado.lista_estatica = [];
   const yaEnEstatica = estado.lista_estatica.find(function(u) { return u.numero === numero; });
@@ -129,8 +133,50 @@ async function agregarFila(numero, nombre) {
   return { ok: true, posicion: estado.fila.length, item };
 }
 
+// ALIAS: nombre real de quien se anota con un nombre de WhatsApp corto ("M" → "Miguel Angel"). Persiste entre días (clave propia en BD).
+let aliasNombres = {};
+async function renombrarEnFila(numero, nuevo) {
+  const u = estado.fila.find(function(x) { return x.numero === numero; });
+  if (!u) return null;
+  const antes = u.nombre;
+  u.nombre = nuevo;
+  (estado.lista_estatica || []).forEach(function(x) { if (x.numero === numero) x.nombre = nuevo; });
+  if (estado.pendiente && estado.pendiente.numero === numero) estado.pendiente.nombre = nuevo;
+  Object.keys(estado.llamados || {}).forEach(function(k) { if (k === numero) estado.llamados[k].nombre = nuevo; });
+  _bit('renombre', u, '«' + antes + '» → «' + nuevo + '»');
+  const persistido = !esManual(numero);
+  if (persistido) { aliasNombres[numero] = nuevo; await pgSet('alias_nombres', aliasNombres); }
+  await guardar('renombrar en fila');
+  return { antes: antes, persistido: persistido, posicion: estado.fila.indexOf(u) + 1 };
+}
+function getAlias(numero) { return aliasNombres[numero] || null; }
+
 // Entradas manuales: no tienen teléfono (numero = 'manual_N'); nunca se mencionan en Eléctricos
 function esManual(numero) { return String(numero || '').indexOf('manual_') === 0; }
+
+// Bitácora de la fila: quién entró/salió y por qué (para aclarar casos tipo "me dijeron que me anotaron y no aparezco")
+function _bit(ev, u, motivo) {
+  if (!estado.bitacora_fila) estado.bitacora_fila = [];
+  estado.bitacora_fila.push({ h: tiempo.ahoraISO(), ev: ev, nombre: u && u.nombre, numero: u && u.numero, motivo: motivo || null });
+  if (estado.bitacora_fila.length > 200) estado.bitacora_fila.splice(0, estado.bitacora_fila.length - 200);
+}
+function bitacoraFila(n) { return (estado.bitacora_fila || []).slice(-(n || 30)); }
+// Mismo nombre: igual, o uno contiene al otro SOLO si el corto tiene ≥ 5 letras (un pushName como "A" o "Al" no debe coincidir con medio mundo)
+function _mismoNombre(a, b) {
+  a = String(a || '').toLowerCase().trim(); b = String(b || '').toLowerCase().trim();
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const corto = a.length <= b.length ? a : b;
+  return corto.length >= 5 && (a.includes(b) || b.includes(a));
+}
+// Quita de la fila (y registra en la bitácora) a quien coincida con el predicado
+function _sacarDeFila(pred, motivo) {
+  const quedan = [];
+  estado.fila.forEach(function(u) { if (pred(u)) _bit('baja', u, motivo); else quedan.push(u); });
+  const n = estado.fila.length - quedan.length;
+  estado.fila = quedan;
+  return n;
+}
 
 // Primera posición (1-based) que se puede ocupar sin saltarse a quien ya tiene un llamado activo:
 // la persona del pendiente "asignar_turno" y quienes tienen timer de conexión activo conservan su lugar.
@@ -188,6 +234,8 @@ async function moverAlFinal(numero) {
   const item = estado.fila.splice(idx, 1)[0];
   item.hora_solicitud = tiempo.ahoraISO();
   estado.fila.push(item);
+  _bit('final', item, 'movido al final #' + estado.fila.length);
+  if (estado.llamados) delete estado.llamados[numero];
   await guardar('mover al final');
   return { posicion: estado.fila.length, item };
 }
@@ -196,6 +244,7 @@ async function quitarFila(numero) {
   const idx = estado.fila.findIndex(function(u) { return u.numero === numero; });
   if (idx === -1) return { ok: false, msg: 'Usuario no encontrado en la fila' };
   const item = estado.fila.splice(idx, 1)[0];
+  _bit('baja', item, 'quitar (admin)');
   await guardar('quitar fila');
   return { ok: true, nombre: item.nombre };
 }
@@ -264,7 +313,8 @@ async function confirmarConexion(cajon) {
   c.hora_inicio    = tiempo.ahoraISO();
   c.timer_conexion = { activo: false, hora_inicio: null, duracion_ms: MS_CONEXION, extensiones: 0 };
   c.timer_sesion   = { activo: true, hora_inicio: tiempo.ahoraISO(), duracion_ms: msSesion };
-  estado.fila = estado.fila.filter(function(u) { return u.numero !== c.numero_actual; });
+  _sacarDeFila(function(u) { return u.numero === c.numero_actual; }, 'confirmó conexión en cajón ' + cajon);
+  if (estado.llamados && c.numero_actual) delete estado.llamados[c.numero_actual];
   await guardar('conexion confirmada ' + cajon);
   return c;
 }
@@ -275,6 +325,7 @@ async function liberarCajon(cajon) {
   if (!c) return null;
   const nombre = c.usuario_actual;
   estado.cargadores[cajon] = cajonVacio(cajon);
+  Object.keys(estado.llamados || {}).forEach(function(k) { if (estado.llamados[k].cajon === cajon) delete estado.llamados[k]; });
   await guardar('liberar ' + cajon);
   return { cajon, nombre };
 }
@@ -297,14 +348,12 @@ async function conectarUsuario(cajon, nombre, numero, horaInicio, extra) {
   c.timer_sesion   = { activo: true, hora_inicio: inicio, duracion_ms: msSesion };
   // Sacar de la fila si está
   if (numero) {
-    estado.fila = estado.fila.filter(function(u) { return u.numero !== numero; });
+    _sacarDeFila(function(u) { return u.numero === numero; }, 'conectado en cajón ' + cajon + ' (' + nombre + ')');
   } else {
     // Sacar por nombre si no hay número
-    estado.fila = estado.fila.filter(function(u) {
-      return !u.nombre.toLowerCase().includes(nombre.toLowerCase()) &&
-             !nombre.toLowerCase().includes(u.nombre.toLowerCase());
-    });
+    _sacarDeFila(function(u) { return _mismoNombre(u.nombre, nombre); }, 'conectado por nombre en cajón ' + cajon + ' (' + nombre + ')');
   }
+  if (estado.llamados && numero) delete estado.llamados[numero];
   await guardar('conectar ' + nombre + ' en ' + cajon);
   return c;
 }
@@ -362,8 +411,8 @@ async function renombrarOcupante(cajon, nombre) {
   if (!c || !c.ocupado) return null;
   c.usuario_actual = nombre;
   const nl = nombre.toLowerCase();
-  const enFila = estado.fila.find(function(u) { const ul = u.nombre.toLowerCase(); return ul === nl || ul.includes(nl) || nl.includes(ul); });
-  if (enFila) { c.numero_actual = esManual(enFila.numero) ? null : enFila.numero; estado.fila = estado.fila.filter(function(u) { return u !== enFila; }); }
+  const enFila = estado.fila.find(function(u) { return _mismoNombre(u.nombre, nombre); });
+  if (enFila) { c.numero_actual = esManual(enFila.numero) ? null : enFila.numero; _sacarDeFila(function(u) { return u === enFila; }, 'renombrado cajón ' + cajon + ' (' + nombre + ')'); }
   await guardar('renombrar ocupante ' + cajon);
   return c;
 }
@@ -470,9 +519,7 @@ async function cargarEstadoInicial(items) {
     if (c.ocupado && c.usuario_actual) nombresConectados.push(c.usuario_actual.toLowerCase());
   }
   const filaAntes = estado.fila.length;
-  estado.fila = estado.fila.filter(function(u) {
-    return !nombresConectados.some(function(n) { return u.nombre.toLowerCase().includes(n) || n.includes(u.nombre.toLowerCase()); });
-  });
+  _sacarDeFila(function(u) { return nombresConectados.some(function(n) { return _mismoNombre(u.nombre, n); }); }, 'reporte matutino (ya conectado)');
   const sacados = filaAntes - estado.fila.length;
 
   await guardar('estado inicial cargado');
@@ -482,6 +529,46 @@ async function cargarEstadoInicial(items) {
 // PENDIENTE
 async function setPendiente(p) { estado.pendiente = p; await guardar('pendiente'); }
 function getPendiente() { return estado.pendiente; }
+
+// LLAMADOS: a quién se le avisó "ya hay un lugar" y para qué cajón (sirve para detectar "no puedo bajar").
+// Se guarda en BD para sobrevivir reinicios; caduca a las 2 h y se limpia en el reinicio de medianoche.
+const MS_LLAMADO_VIGENTE = 2 * 60 * 60 * 1000;
+function _dig(x) { return String(x || '').replace(/@.*$/, '').replace(/\D/g, ''); }
+async function marcarLlamado(numero, cajon, nombre) {
+  if (!estado.llamados) estado.llamados = {};
+  estado.llamados[numero] = { cajon: String(cajon), nombre: nombre, hora: tiempo.ahoraISO() };
+  await guardar('llamado ' + cajon);
+}
+async function limpiarLlamado(numero) {
+  if (estado.llamados && estado.llamados[numero]) { delete estado.llamados[numero]; await guardar('limpiar llamado'); }
+}
+async function limpiarLlamadosCajon(cajon) {
+  cajon = String(cajon);
+  let n = 0;
+  Object.keys(estado.llamados || {}).forEach(function(k) { if (estado.llamados[k].cajon === cajon) { delete estado.llamados[k]; n++; } });
+  if (n) await guardar('limpiar llamados cajon ' + cajon);
+}
+// Llamado vigente de una persona: { numero, cajon, nombre, fase: 'llamado' | 'turno' } o null.
+//  - 'llamado': se le avisó, el cajón sigue libre y ella sigue en la fila
+//  - 'turno'  : el ayudante ya confirmó (sí) y corre su ventana de 15 min en ese cajón
+function getLlamadoActivo(numero) {
+  const dn = _dig(numero);
+  if (!dn) return null;
+  for (const cajon of CAJONES) {
+    const c = estado.cargadores[cajon];
+    if (c && !c.ocupado && c.timer_conexion && c.timer_conexion.activo && _dig(c.numero_actual) === dn) {
+      return { numero: c.numero_actual, cajon: cajon, nombre: c.usuario_actual, fase: 'turno', desde: c.timer_conexion.hora_inicio };
+    }
+  }
+  const k = Object.keys(estado.llamados || {}).find(function(x) { return _dig(x) === dn; });
+  if (!k) return null;
+  const ll = estado.llamados[k];
+  if (tiempo.ahoraMs() - new Date(ll.hora).getTime() > MS_LLAMADO_VIGENTE) return null;
+  const c = estado.cargadores[ll.cajon];
+  if (!c || c.ocupado || (c.timer_conexion && c.timer_conexion.activo)) return null;   // el cajón ya se ocupó
+  if (!estado.fila.some(function(u) { return u.numero === k; })) return null;           // ya no está en la fila
+  return { numero: k, cajon: ll.cajon, nombre: ll.nombre, fase: 'llamado', desde: ll.hora };
+}
 
 // TIEMPO ESTIMADO
 function tiempoEstimado(posicion) {
@@ -564,8 +651,8 @@ module.exports = {
   iniciarTimerConexion, extenderTimerConexion, confirmarConexion, liberarCajon,
   conectarUsuario, buscarCajonDeUsuario, buscarEnFila,
   cargarEstadoInicial, ocupantes, renombrarOcupante, ajustarInicio, marcarTiempoCumplido, marcarRecordatorios, cargarGrupos, guardarGrupos, cargarSilencio, guardarSilencio,
-  setPendiente, getPendiente,
+  setPendiente, getPendiente, marcarLlamado, limpiarLlamado, limpiarLlamadosCajon, getLlamadoActivo,
   resumenFila, resumenCargadores, resumenCompleto, resumenListaEstatica,
-  anotarManual, moverEnFila, posicionMinima, esManual, buscarEnFilaTolerate,
+  bitacoraFila, renombrarEnFila, getAlias, anotarManual, moverEnFila, posicionMinima, esManual, buscarEnFilaTolerate,
   MS_CONEXION, MS_SESION, MS_SESION_VIP, CAJONES, CAJONES_VIP
 };

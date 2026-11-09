@@ -13,6 +13,8 @@ function crear(deps) {
   const db = deps.db, tiempo = deps.tiempo;
   const HORA_APERTURA = deps.horaApertura === undefined ? 8 : deps.horaApertura;
   const HORA_CIERRE = deps.horaCierre === undefined ? 20 : deps.horaCierre;
+  // Se abre 1 minuto antes (7:59) para no perder a quien escribe justo a las 8:00 en punto
+  const ADELANTO_MIN = deps.adelantoMin === undefined ? 1 : deps.adelantoMin;
   const listo = deps.listo || function() { return true; };
 
   function habil() { const d = tiempo.diaSemanaMex(); return d >= 1 && d <= 5; }
@@ -28,10 +30,12 @@ function crear(deps) {
     const est = db.getEstado();
     const hoy = tiempo.fechaMex(Date.now());
     if (est.lista_dia !== hoy) await db.nuevoDiaLista(hoy);   // cambio de día: cerrada, VIP cerrado
-    const h = tiempo.partesMex(Date.now()).h;
+    const pm = tiempo.partesMex(Date.now());
+    const h = pm.h;
+    const minutosDia = pm.h * 60 + pm.mi;
     const e2 = db.getEstado();
     if (e2.lista_abierta && h >= HORA_CIERRE) { await cerrar(); return 'cerrada'; }
-    if (!e2.lista_abierta && !e2.lista_auto_hecho && habil() && h >= HORA_APERTURA && h < HORA_CIERRE) {
+    if (!e2.lista_abierta && !e2.lista_auto_hecho && habil() && minutosDia >= HORA_APERTURA * 60 - ADELANTO_MIN && h < HORA_CIERRE) {
       if (!listo()) return 'esperando';                       // sin conexión: reintenta en el siguiente minuto
       await abrir();
       return 'abierta';

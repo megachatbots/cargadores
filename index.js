@@ -41,7 +41,7 @@ let conectado       = false;
 let sockRef         = null;
 let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion;
 
-const VERSION = 'etapa1c-2';
+const VERSION = 'etapa1c-5';
 // Miembros de Eléctricos (solo a ellos se les menciona). null = aún no cargado → no se filtra.
 let miembrosElectricos = null;
 const _noMiembroAvisado = new Set();
@@ -397,6 +397,8 @@ async function procesarElectricos(texto, numeroFrom, nombreFrom) {
   if (miembrosElectricos) miembrosElectricos.add(_digitos(numeroFrom));   // quien escribe es miembro
   // Respuesta a un recordatorio ("ya me desconecté", "sí"): detiene SUS recordatorios y avisa a Proyecto Bot; nunca libera el cajón
   if (await control.respuestaUsuario(numeroFrom, nombreFrom, texto)) return;
+  // "Ahorita no puedo", "estoy en junta"… de alguien a quien ya se llamó: se vuelve a formar al final y se llama a la siguiente persona
+  if (await control.noPuedeBajar(numeroFrom, nombreFrom, texto)) return;
   // Lista cerrada (antes de las 8:00, fin de semana o cerrada por admin): las solicitudes se omiten
   if (!db.listaAbierta()) { console.log('[ELÉCTRICOS] Lista cerrada: mensaje omitido (' + nombreFrom + ')'); return; }
   const r = await motor.detectarSolicitud(texto, nombreFrom);
@@ -617,6 +619,15 @@ async function procesarProyectoBot(texto, numeroFrom, nombreFrom) {
     return;
   }
 
+  // Bitácora de la fila: altas y bajas con su motivo
+  if (tl === 'bitacora' || tl === 'bitácora' || tl === 'bitacora fila') {
+    const b = db.bitacoraFila(30);
+    await enviarProyectoBot(!b.length ? '📒 Bitácora vacía.' : '📒 *Bitácora de la fila* (últimos ' + b.length + ')\n' + b.map(function(x) {
+      return tiempo.horaLocal(x.h) + ' ' + (x.ev === 'alta' ? '➕' : x.ev === 'baja' ? '➖' : '↘️') + ' ' + x.nombre + ' — ' + x.motivo;
+    }).join('\n'));
+    return;
+  }
+
   // Lista estática directo
   if (tl === 'lista estatica' || tl === 'lista estática') {
     await enviarProyectoBot(db.resumenListaEstatica());
@@ -784,6 +795,7 @@ async function iniciarBot() {
       console.log('Bot conectado');
       setTimeout(function() { detectarGrupos(sock, true); }, 2000);
       setTimeout(refrescarAdmins, 5000);
+      setTimeout(refrescarMiembros, 4000);   // sin esto la lista de miembros queda en null hasta 30 min tras cada deploy
     }
   });
   sock.ev.on('creds.update', saveCreds);
@@ -922,10 +934,12 @@ async function arrancar() {
     refrescarMiembros();
     setInterval(refrescarMiembros, 30 * 60 * 1000);
     setInterval(refrescarAdmins, 30 * 60 * 1000);
-    setInterval(function() {
+    // El tick va alineado al segundo :00 de cada minuto: así la lista abre a las 7:59:00 y no "entre 8:00 y 8:01" según cuándo arrancó el proceso
+    function tickMinuto() {
       listaCtl.tick().catch(function(e) { console.log('[lista] tick error:', e.message); });
       vaciarDiferidos().catch(function(e) { console.log('[diferidos] error:', e.message); });
-    }, 60 * 1000);
+    }
+    setTimeout(function() { tickMinuto(); setInterval(tickMinuto, 60 * 1000); }, 60000 - (Date.now() % 60000) + 200);
     listaCtl.tick().catch(function(e) { console.log('[lista] tick error:', e.message); });
     programarReinicioNocturno();
     await iniciarBot();

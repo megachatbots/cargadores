@@ -28,6 +28,7 @@ async function reset() {
   db.CAJONES.forEach(function(c) { timers.cancelarTimerConexion(c); timers.cancelarTimerSesion(c); });
   control._detener();
   Object.keys(control._pendientes).forEach(function(k) { delete control._pendientes[k]; });
+  Object.keys(control._avisadoCorto).forEach(function(k) { delete control._avisadoCorto[k]; });
   await db.reiniciarTodo();
   mock.timers.setTime(T0);
   limpiar();
@@ -310,6 +311,94 @@ const cj = function(n) { return db.getEstado().cargadores[n]; };
   check('un "sí" sin número NO se acepta', (await control.respuestaUsuario('5215514385349', 'Cit', 'Sí')) === false);
   limpiar();
   check('no repite el aviso por nombre', (await control.respuestaUsuario('5215514385349', 'Cit', 'ya me desconecté')) === false && P.length === 0);
+  control._detener();
+
+  console.log('\n"No puedo bajar" (etapa1c-3): se vuelve a formar al final y se llama a la siguiente persona');
+  async function escenario() {
+    await reset();
+    await db.agregarFila('5215500000101', 'Ana Pérez'); await db.agregarFila('5215500000102', 'Beto Ruiz'); await db.agregarFila('5215500000103', 'Carla Soto');
+    await db.conectarUsuario('41', 'Luis Vega', null);
+    await control.procesar('41 libre');       // llama a Ana
+    limpiar();
+  }
+  await escenario();
+  check('base: Ana quedó llamada para el cajón 41 y el pendiente es suyo', db.getLlamadoActivo('5215500000101') && db.getLlamadoActivo('5215500000101').cajon === '41' && db.getPendiente().nombre === 'Ana Pérez');
+  check('sin llamado activo, "no puedo" de Beto (en fila, no llamado) no hace nada', (await control.noPuedeBajar('5215500000102', 'Beto', 'ahorita no puedo')) === false && db.getEstado().fila[0].nombre === 'Ana Pérez');
+  check('un "ya voy" de Ana no se interpreta como rechazo', (await control.noPuedeBajar('5215500000101', 'Ana', 'ya voy')) === false);
+
+  const declinan = ['ahorita no puedo', 'termino junta y bajo', 'me vuelvo a formar', 'salí pero en cuanto me regrese me conecto', 'termino una llamada y bajo', 'estoy en reunión', 'bajo en 40 min'];
+  for (const frase of declinan) {
+    await escenario();
+    const r = await control.noPuedeBajar('5215500000101', 'Ana', frase);
+    const fila = db.getEstado().fila.map(function(u) { return u.nombre; });
+    check('«' + frase + '» → Ana al final: ' + fila.join(', '), r === true && fila.join(',') === 'Beto Ruiz,Carla Soto,Ana Pérez', fila.join(','));
+    check('   · se llama a Beto para el cajón 41 y el pendiente pasa a Beto', E.some(function(x) { return x.m === '5215500000102' && /lugar disponible/.test(x.t); }) && db.getPendiente().nombre === 'Beto Ruiz' && db.getPendiente().cargador_id === '41', JSON.stringify([E, db.getPendiente()]));
+    check('   · Ana recibe confirmación con su posición 3', E.some(function(x) { return x.m === '5215500000101' && /posición 3/.test(x.t); }), JSON.stringify(E));
+    check('   · Proyecto Bot informa y pide *sí*', P.length === 1 && /Ana Pérez/.test(P[0]) && /Beto Ruiz/.test(P[0]) && /\*sí\*/.test(P[0]), JSON.stringify(P));
+    check('   · el cajón 41 NO se toca (sigue con su ocupante real)', cj('41').ocupado === false);
+  }
+  for (const frase of ['me conecto en 10', 'bajo en 15 min', 'ahorita no puedo, me conecto en 10']) {
+    await escenario();
+    const r = await control.noPuedeBajar('5215500000101', 'Ana', frase);
+    check('«' + frase + '» → solo aviso a Proyecto Bot, Ana sigue primera', r === true && db.getEstado().fila[0].nombre === 'Ana Pérez' && P.length === 1 && /Ana Pérez/.test(P[0]) && /min/.test(P[0]), JSON.stringify(P));
+    check('   · no se llama a nadie más ni se escribe en Eléctricos', E.length === 0 && db.getPendiente().nombre === 'Ana Pérez', JSON.stringify(E));
+    limpiar();
+    check('   · un segundo aviso igual no repite el mensaje', (await control.noPuedeBajar('5215500000101', 'Ana', frase)) === true && P.length === 0);
+  }
+
+  console.log('\n"No puedo bajar": casos de borde');
+  await escenario();
+  await control.noPuedeBajar('5215500000101', 'Ana', 'ahorita no puedo'); limpiar();
+  check('repetir el mensaje no la mueve otra vez (ya no tiene llamado)', (await control.noPuedeBajar('5215500000101', 'Ana', 'ahorita no puedo')) === false && E.length === 0 && P.length === 0);
+
+  await reset();
+  await db.agregarFila('5215500000101', 'Ana Pérez');
+  await db.conectarUsuario('41', 'Luis Vega', null);
+  await control.procesar('41 libre'); limpiar();
+  check('única persona en la fila: se reforma (queda 1) y no se le vuelve a llamar en bucle', (await control.noPuedeBajar('5215500000101', 'Ana', 'estoy en reunión')) === true && db.getEstado().fila.length === 1 && !E.some(function(x) { return /lugar disponible/.test(x.t); }), JSON.stringify(E));
+  check('   · Proyecto Bot dice que no hay a quién llamar y el pendiente se limpia', /No hay a quién llamar/.test(P[0]) && db.getPendiente() === null, JSON.stringify([P, db.getPendiente()]));
+
+  await escenario();
+  await control.procesar('Se conecta\nCajón 41\nBeto Ruiz\n11A111 BYD\n2:00 A 5:00'); limpiar();
+  check('si el cajón ya lo ocupó otra persona, el "no puedo" de Ana ya no aplica', (await control.noPuedeBajar('5215500000101', 'Ana', 'ahorita no puedo')) === false && db.getEstado().fila[0].nombre === 'Ana Pérez');
+
+  await escenario();
+  await control.procesar('Se conecta\nCajón 42\nBeto Ruiz\n11A111 BYD\n2:00 A 5:00'); limpiar();
+  check('si el cajón 41 sigue libre y Beto ya está conectado, se llama a Carla (no a Beto)', (await control.noPuedeBajar('5215500000101', 'Ana', 'ahorita no puedo')) === true && E.some(function(x) { return x.m === '5215500000103'; }) && !E.some(function(x) { return x.m === '5215500000102'; }), JSON.stringify(E));
+
+  // Fase "turno": el ayudante ya confirmó (sí) y corre su ventana de 15 min
+  await escenario();
+  await db.setPendiente(null);
+  await timers.iniciarTimerConexion('41', 'Ana Pérez', '5215500000101');
+  check('en turno (ventana de 15 min) también aplica', db.getLlamadoActivo('5215500000101').fase === 'turno');
+  limpiar();
+  check('«estoy en reunión» durante la ventana → se reforma', (await control.noPuedeBajar('5215500000101', 'Ana', 'estoy en reunión')) === true && db.getEstado().fila[2].nombre === 'Ana Pérez');
+  check('   · la ventana de espera se cancela y se llama a Beto', cj('41').timer_conexion.activo === false && cj('41').usuario_actual === null && E.some(function(x) { return x.m === '5215500000102' && /lugar disponible/.test(x.t); }), JSON.stringify([cj('41').timer_conexion, E]));
+  check('   · Proyecto Bot menciona que canceló la ventana de 15 min', /ventana de 15 min/.test(P[0]), JSON.stringify(P));
+  await avanzar(20 * MIN);
+  check('   · pasados 20 min no salen mensajes de "perdiste tu turno" para Ana', !E.some(function(x) { return /perdiste/.test(x.t); }), JSON.stringify(E));
+
+  // Entrada manual como siguiente: no se menciona en Eléctricos
+  await reset();
+  await db.agregarFila('5215500000101', 'Ana Pérez');
+  await db.anotarManual('Don Memo', 2);
+  await db.conectarUsuario('41', 'Luis Vega', null);
+  await control.procesar('41 libre'); limpiar();
+  check('siguiente es una entrada manual: solo se avisa a Proyecto Bot', (await control.noPuedeBajar('5215500000101', 'Ana', 'ahorita no puedo')) === true && P.some(function(t) { return /Don Memo/.test(t) && /sin teléfono/.test(t); }) && !E.some(function(x) { return /Memo/.test(x.t); }), JSON.stringify([P, E]));
+
+  // Cajón VIP cerrado: no se llama a la fila
+  await reset();
+  await db.agregarFila('5215500000101', 'Ana Pérez'); await db.agregarFila('5215500000102', 'Beto Ruiz');
+  await db.marcarLlamado('5215500000101', '46', 'Ana Pérez');
+  check('llamado a un cajón VIP cerrado: se reforma pero no se llama a nadie para él', (await control.noPuedeBajar('5215500000101', 'Ana', 'ahorita no puedo')) === true && !E.some(function(x) { return x.m === '5215500000102'; }), JSON.stringify(E));
+
+  // Llamado caducado (> 2 h) o persona fuera de la fila
+  await escenario();
+  await avanzar(3 * 60 * MIN);
+  check('un llamado de hace 3 h ya no cuenta', (await control.noPuedeBajar('5215500000101', 'Ana', 'ahorita no puedo')) === false);
+  await escenario();
+  await db.quitarFila('5215500000101');
+  check('si la sacaron de la fila, no aplica', (await control.noPuedeBajar('5215500000101', 'Ana', 'ahorita no puedo')) === false);
   control._detener();
 
   console.log('\nResultado: ' + ok + '/' + (ok + fail) + ' ✅  ' + fail + ' ❌');

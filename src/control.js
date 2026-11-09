@@ -1,6 +1,7 @@
 // src/control.js — Procesa los mensajes del grupo Control de Cargadores (el ayudante es la fuente de verdad).
 // Las dependencias se inyectan para poder probarlo sin Baileys.
 const ayudante = require('./ayudante');
+const declina = require('./declina');
 
 const MS_RECORDATORIO = 15 * 60 * 1000;
 const MS_AVISO_DISPONIBLES = 10 * 60 * 1000;
@@ -186,18 +187,72 @@ function crear(deps) {
     await db.liberarCajon(cajon);
     // Cajones VIP (46/50): no se ofrecen a la fila general mientras un admin no los abra
     if (db.CAJONES_VIP.has(cajon) && !db.vipAbierto()) { console.log('[CONTROL] Cajón VIP ' + cajon + ' liberado; no se llama a la fila'); return true; }
-    const sig = siguientesSinTurno().find(function(u) { return !llamados[u.numero]; });
-    if (sig && sig.numero) {
-      if (db.esManual(sig.numero)) {
-        // anotado a mano: no tiene teléfono, no se menciona en Eléctricos
-        await proyectoBot('⚡ Cajón ' + cajon + ' libre: le toca a *' + sig.nombre + '* (anotado a mano, sin teléfono). Avísale tú.');
-      } else {
-        await electricos(sig.nombre + ' @' + sig.numero + ' ya hay un lugar disponible para conectarte 🔌', sig.numero);
-      }
-      llamados[sig.numero] = true;
-      await db.setPendiente({ tipo: 'asignar_turno', cargador_id: cajon, nombre: sig.nombre, numero: sig.numero });
-    }
+    await llamarAlSiguiente(cajon, llamados);
     console.log('[CONTROL] Desconexión cajón ' + cajon);
+    return true;
+  }
+
+  // Llama a la siguiente persona de la fila para un cajón libre. `llamados` = personas que no deben repetirse.
+  // opts.saltarLlamados: omite a quien ya tiene un llamado vigente para otro cajón. Devuelve la persona llamada o null.
+  async function llamarAlSiguiente(cajon, llamados, opts) {
+    const saltar = !!(opts && opts.saltarLlamados);
+    const sig = siguientesSinTurno().find(function(u) { return !llamados[u.numero] && !(saltar && db.getLlamadoActivo(u.numero)); });
+    if (!sig || !sig.numero) return null;
+    if (db.esManual(sig.numero)) {
+      // anotado a mano: no tiene teléfono, no se menciona en Eléctricos
+      await proyectoBot('⚡ Cajón ' + cajon + ' libre: le toca a *' + sig.nombre + '* (anotado a mano, sin teléfono). Avísale tú.');
+    } else {
+      await electricos(sig.nombre + ' @' + sig.numero + ' ya hay un lugar disponible para conectarte 🔌', sig.numero);
+    }
+    llamados[sig.numero] = true;
+    await db.marcarLlamado(sig.numero, cajon, sig.nombre);
+    await db.setPendiente({ tipo: 'asignar_turno', cargador_id: cajon, nombre: sig.nombre, numero: sig.numero });
+    return sig;
+  }
+
+  // ── "No puedo bajar": alguien a quien ya se llamó (o con turno de 15 min) dice que no puede ahora.
+  //  · promete ≤ 15 min  → solo se avisa a Proyecto Bot (no se mueve a nadie)
+  //  · abierto o > 15 min → se vuelve a formar al FINAL, se llama a la siguiente persona y se avisa a Proyecto Bot
+  // Nunca toca un cajón ocupado: solo libera la ventana de espera (cajón sin coche) de quien cede su turno.
+  const avisadoCorto = {};
+  async function noPuedeBajar(numero, nombreWa, textoMsg) {
+    const r = declina.clasificar(textoMsg);
+    if (!r) return false;
+    const ll = db.getLlamadoActivo(numero);
+    if (!ll) return false;
+    const citado = String(textoMsg).trim().substring(0, 80);
+    if (r.tipo === 'aviso_corto') {
+      const k = ll.numero + '|' + ll.cajon + '|' + ll.fase + '|' + ll.desde;   // un llamado nuevo vuelve a avisar
+      if (avisadoCorto[k]) return true;
+      avisadoCorto[k] = true;
+      await avisoDiferible('⏳ *' + ll.nombre + '* respondió «' + citado + '»: se conecta en ~' + r.minutos + ' min (cajón ' + ll.cajon + '). ' +
+        'No lo moví de la fila ni llamé a nadie más. Si no llega: *' + ll.nombre + ' no llegó*.');
+      return true;
+    }
+    return cederTurno(ll, citado);
+  }
+
+  async function cederTurno(ll, citado) {
+    const cajon = ll.cajon;
+    if (ll.fase === 'turno') {
+      timers.cancelarTimerConexion(cajon);
+      await db.liberarCajon(cajon);            // era solo una ventana de espera: no hay coche
+    }
+    const pend = db.getPendiente();
+    if (pend && pend.tipo === 'asignar_turno' && soloDigitos(pend.numero) === soloDigitos(ll.numero)) await db.setPendiente(null);
+    const res = await db.moverAlFinal(ll.numero);
+    if (!res) { await db.limpiarLlamado(ll.numero); return false; }
+    const c = db.getEstado().cargadores[cajon];
+    const libre = c && !c.ocupado && !(c.timer_conexion && c.timer_conexion.activo);
+    let sig = null;
+    if (libre && !(db.CAJONES_VIP.has(cajon) && !db.vipAbierto())) sig = await llamarAlSiguiente(cajon, (function() { const o = {}; o[ll.numero] = true; return o; })(), { saltarLlamados: true });
+    if (!db.esManual(ll.numero)) {
+      await electricos(ll.nombre + ' @' + ll.numero + ' listo, te volví a formar al final de la lista (posición ' + res.posicion + ') 👍', ll.numero);
+    }
+    await avisoDiferible('🔁 *' + ll.nombre + '* dijo «' + citado + '». Lo volví a formar al final (posición ' + res.posicion + ')' +
+      (ll.fase === 'turno' ? ' y cancelé su ventana de 15 min' : '') + '. ' +
+      (sig ? 'Llamé a *' + sig.nombre + '* para el cajón ' + cajon + ': responde *sí* para darle el turno.' : 'No hay a quién llamar para el cajón ' + cajon + ' (sigue libre).'));
+    console.log('[CONTROL] ' + ll.nombre + ' cede su turno (cajón ' + cajon + ') → posición ' + res.posicion + (sig ? ', llamado ' + sig.nombre : ''));
     return true;
   }
 
@@ -333,7 +388,7 @@ function crear(deps) {
     return true;
   }
 
-  return { procesar, respuestaUsuario, ajustarInicio, sesionCumplida, reanudarRecordatorios, cancelarRecordatorio, _pendientes: pendientes, _detener: detenerIntervalo };
+  return { procesar, respuestaUsuario, noPuedeBajar, ajustarInicio, sesionCumplida, reanudarRecordatorios, cancelarRecordatorio, _pendientes: pendientes, _avisadoCorto: avisadoCorto, _detener: detenerIntervalo };
 }
 
 module.exports = { crear };
