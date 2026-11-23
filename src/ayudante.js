@@ -184,8 +184,62 @@ function parsearConexiones(t) {
   return eventos;
 }
 
+// ── Conexiones con el número de cajón SOLO en su línea (formato del ayudante nuevo, desde 9 nov):
+//    "42\nEricka Rodríguez conectada 9:38 a 12:38"
+//    "41\nAlix Córdoba\nByd 02G518\nConectada antes de 7 am."   (varios bloques en un mensaje, separados o no por línea en blanco)
+//    "46\nJavier Jara\nBMW 77j430\nConectado uso extendido"      (sin hora → se cuenta desde ahora)
+const RE_LINEA_CAJON = /^\s*(\d{2})\s*[.:]?\s*$/;
+const RE_CONECTADO = /(?<![a-záéíóúñ])conectad[oa]s?(?![a-záéíóúñ])/i;
+function parsearConexionesPorNumero(t) {
+  const lineas = t.split('\n');
+  const bloques = [];
+  let cur = null;
+  lineas.forEach(function(l) {
+    const m = l.match(RE_LINEA_CAJON);
+    if (m) { cur = { cajon: m[1], lineas: [] }; bloques.push(cur); }
+    else if (cur && l.trim()) cur.lineas.push(l.trim());
+  });
+  const eventos = [];
+  bloques.forEach(function(b) {
+    if (CAJONES_VALIDOS.indexOf(b.cajon) === -1 || !b.lineas.length) return;
+    const iEstado = b.lineas.findIndex(function(l) { return RE_CONECTADO.test(l); });
+    if (iEstado === -1) return;                                   // sin "conectado/a": no es una conexión
+    const lEst = b.lineas[iEstado];
+    const mc = lEst.match(RE_CONECTADO);
+    const antes = lEst.slice(0, mc.index).trim();                 // lo que va antes de "conectada" en esa línea
+    const despues = lEst.slice(mc.index + mc[0].length).trim();   // horario / "antes de 7 am" / "uso extendido"
+    if (/falla|foco|no funciona|no carga|bloquead|mantenimiento|descompuest|averi/i.test(b.lineas.join(' '))) return;
+    if (/\bno\s+(?:se\s+)?(?:ha\s+)?conectad/i.test(lEst)) return;   // "no se ha conectado"
+    const previas = b.lineas.slice(0, iEstado);                   // nombre y (opcional) marca/placas en líneas propias
+    let nombre, vehiculo = [];
+    if (antes) { nombre = antes; vehiculo = previas; }
+    else { nombre = previas[0] || null; vehiculo = previas.slice(1); }
+    if (!nombre) return;
+    const veh = parsearBloqueOcupado(['x'].concat(vehiculo));
+    let horaInicio = null, horaFin = null;
+    const mr = despues.match(/(\d{1,2})[:.](\d{2})\s*(?:[-–—]|\ba\b|\bal\b|\bhasta\b)\s*(\d{1,2})\s*[:.\-]\s*(\d{2})/i);
+    if (mr) { horaInicio = mr[1] + ':' + mr[2]; horaFin = mr[3] + ':' + mr[4]; }
+    else if (/antes\s+de/i.test(despues)) horaInicio = '7:00';    // misma convención que "Se conecta … antes de las 7"
+    // "uso extendido" o sin hora: horaInicio null → se cuenta desde ahora
+    eventos.push({
+      tipo: 'conecta', cajon: b.cajon, nombre: nombre.replace(/\s+/g, ' ').trim(), horaInicio: horaInicio, horaFin: horaFin,
+      marca: veh.marca, placas: veh.placas, nombreDudoso: nombreDudoso(nombre)
+    });
+  });
+  return eventos;
+}
+
+// "Nombre\nDesconectado" / "Nombre\nSe tiene que desconectar" (nombre y estado en líneas separadas) → una sola línea
+function unirNombreEstado(t) {
+  return t.replace(/^([^\n]{2,80}?)[ \t]*\n[ \t]*(desconectad[oa]s?|se\s+tiene[n]?\s+que\s+desconectar(?:se)?|se\s+desconect(?:a|ó|o))[ \t]*[.!]*[ \t]*$/gim,
+    function(_, nombre, estado) {
+      if (/^se\s+desconect/i.test(nombre.trim())) return _;      // "Se desconecta\nNombre" va por otro camino
+      return nombre.trim() + ' ' + (/^se\s+desconect/i.test(estado) ? 'desconectado' : estado);
+    });
+}
+
 function parsearMensajeAyudante(texto) {
-  const t = String(texto || '').replace(/\r/g, '');
+  const t = unirNombreEstado(String(texto || '').replace(/\r/g, ''));
   const r = parsearRecordar(t);
   if (r) return [r];
   const d = parsearDesconectaron(t);
@@ -194,6 +248,8 @@ function parsearMensajeAyudante(texto) {
   if (nd) return nd;
   const disp = parsearDisponibles(t);
   if (disp) return [disp];
+  const porNumero = parsearConexionesPorNumero(t);
+  if (porNumero.length) return porNumero;
   const libres = parsearLibres(t);
   if (hayLibres(libres)) return [{ tipo: 'libre', cajones: libres.validos, invalidos: libres.invalidos }];
   return parsearConexiones(t);

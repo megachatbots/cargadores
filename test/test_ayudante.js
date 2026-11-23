@@ -123,5 +123,32 @@ check('"Roxana y Nancy se tienen que desconectar"', (function() { const r = ev('
 check('dos líneas, una por persona', (function() { const r = ev('Roxana se tiene que desconectar\nCitlali se tiene que desconectar'); return r.length === 1 && j(r[0].nombres) === j(['Roxana', 'Citlali']); })());
 check('mezclado con texto ajeno NO se interpreta', ev('Roxana se tiene que desconectar\nMando a Pablo').length === 0);
 
+console.log('\nFormatos reales del ayudante nuevo (23 nov): "N / Nombre conectada H a H" y "Nombre / Desconectado"');
+e = ev('42\nEricka Rodríguez conectada 9:38 a 12:38');
+check('REAL "42 / Ericka Rodríguez conectada 9:38 a 12:38"', e.length === 1 && e[0].tipo === 'conecta' && e[0].cajon === '42' && e[0].nombre === 'Ericka Rodríguez' && e[0].horaInicio === '9:38' && e[0].horaFin === '12:38' && !e[0].nombreDudoso, j(e));
+e = ev('45 \nDavid seinfield conectado 10:47 a 1:47');
+check('REAL número con espacio al final y 1:47 (p.m.)', e.length === 1 && e[0].cajon === '45' && e[0].horaInicio === '10:47' && e[0].horaFin === '1:47', j(e));
+e = ev('48\nNancy Bañuelos conectada 10:59 a 1:59\n');
+check('REAL con salto de línea final', e.length === 1 && e[0].cajon === '48' && e[0].nombre === 'Nancy Bañuelos', j(e));
+const lista = '41\nAlix Córdoba \nByd 02G518 \nConectada antes de 7 am.\n\n42\nRossy Curiel \nLink&Co 49H364 \nConectada 7:03 a 10:03\n\n44\nEugenia César \nVolvo 76J706\nConectada 7:12 a 10:12 \n\n45\nGerardo Jurado \nGeely 56k948\nConectado 7:20 a 10:20\n\n46\nJavier Jara\nBMW 77j430\nConectado uso extendido \n\n48\nHéctor Alvarez \nGeely 13h621\nConectado antes de las 7 am \n\n49\nErick Palomec \nByd 42k093\nConectado 7:10 a 10:10\n\n50\nCarlos Seghun \nZeekr 90j941\nConectado uso extendido';
+e = ev(lista);
+check('REAL lista de las 8:11: 8 conexiones', e.length === 8 && e.every(function(x) { return x.tipo === 'conecta'; }), j(e.map(function(x) { return x.cajon; })));
+check('   · "antes de 7 am" → inicio 7:00 sin hora fin', e[0].cajon === '41' && e[0].horaInicio === '7:00' && e[0].horaFin === null && e[5].cajon === '48' && e[5].horaInicio === '7:00', j([e[0], e[5]]));
+check('   · placas y marca de cada bloque', e[1].marca === 'Link&Co' && e[1].placas === '49H364' && e[3].placas === '56K948', j([e[1], e[3]]));
+check('   · "uso extendido" sin hora → inicio null (se cuenta desde ahora)', e[4].cajon === '46' && e[4].horaInicio === null && e[7].cajon === '50' && e[7].horaInicio === null, j([e[4], e[7]]));
+check('"41\\nLibre" y "46\\nLibre uso extendido" NO son conexiones', ev('48\nLibre uso extendido').length === 0 && ev('41\nLibre').filter(function(x) { return x.tipo === 'conecta'; }).length === 0);
+check('"42\\nPablo no se ha conectado" NO es conexión', ev('42\nPablo no se ha conectado').length === 0, j(ev('42\nPablo no se ha conectado')));
+check('cajón inexistente (59) no genera conexión', ev('59\nPablo Perez conectado 9:00 a 12:00').length === 0);
+e = ev('Miguel Juarez \nDesconectado');
+check('REAL "Miguel Juarez / Desconectado" (2 líneas)', e.length === 1 && e[0].tipo === 'desconectaron' && j(e[0].nombres) === j(['Miguel Juarez']), j(e));
+e = ev('Rosy Curiel \nDesconectada');
+check('REAL "Rosy Curiel / Desconectada"', e.length === 1 && e[0].tipo === 'desconectaron' && j(e[0].nombres) === j(['Rosy Curiel']), j(e));
+e = ev('Ana Mendez\n Se tiene que desconectar');
+check('REAL "Ana Mendez / Se tiene que desconectar" (2 líneas) → recordar', e.length === 1 && e[0].tipo === 'recordar' && j(e[0].nombres) === j(['Ana Mendez']), j(e));
+e = ev('Alejamos Espinosa \nSe desconecta');
+check('REAL "Alejamos Espinosa / Se desconecta" → confirmación', e.length === 1 && e[0].tipo === 'desconectaron', j(e));
+check('"Se desconecta\\n\\nNombre" (orden inverso) sigue igual', j(ev('Se desconecta\n\nCitlali')) === j([{ tipo: 'desconectaron', nombres: ['Citlali'] }]), j(ev('Se desconecta\n\nCitlali')));
+check('REAL "Rossy Curiel desconectada" y "Libre 42" siguen igual', ev('Rossy Curiel desconectada')[0].tipo === 'desconectaron' && lib('Libre 42') === '42');
+
 console.log('\nResultado: ' + ok + '/' + (ok + fail) + ' ✅  ' + fail + ' ❌');
 process.exit(fail ? 1 : 0);

@@ -439,6 +439,69 @@ const cj = function(n) { return db.getEstado().cargadores[n]; };
   check('si la sacaron de la fila, no aplica', (await control.noPuedeBajar('5215500000101', 'Ana', 'ahorita no puedo')) === false);
   control._detener();
 
+  console.log('\nMañana del 23 nov (caso real): lista 8:11 en formato nuevo, desconexión + "Libre N", conexión "N / Nombre conectada…"');
+  await reset();
+  mock.timers.setTime(Date.UTC(2026, 10, 23, 14, 11, 0));            // 8:11 a.m. México (lunes)
+  await db.agregarFila('5215500000201', 'Erika Rodríguez');
+  await db.agregarFila('5215500000202', 'Jonathan Olmos');
+  await db.agregarFila('5215500000203', 'Alfonso Moguel');
+  limpiar();
+  await control.procesar('41\nAlix Córdoba \nByd 02G518 \nConectada antes de 7 am.\n\n42\nRossy Curiel \nLink&Co 49H364 \nConectada 7:03 a 10:03\n\n44\nEugenia César \nVolvo 76J706\nConectada 7:12 a 10:12 \n\n45\nGerardo Jurado \nGeely 56k948\nConectado 7:20 a 10:20\n\n46\nJavier Jara\nBMW 77j430\nConectado uso extendido \n\n48\nHéctor Alvarez \nGeely 13h621\nConectado antes de las 7 am \n\n49\nErick Palomec \nByd 42k093\nConectado 7:10 a 10:10\n\n50\nCarlos Seghun \nZeekr 90j941\nConectado uso extendido');
+  check('la lista de las 8:11 registra los 8 cajones ocupados', db.ocupantes().length === 8 && cj('42').usuario_actual === 'Rossy Curiel' && cj('46').usuario_actual === 'Javier Jara', db.ocupantes().map(function(o) { return o.id; }).join());
+  mock.timers.setTime(Date.UTC(2026, 10, 23, 15, 28, 0));            // 9:28
+  limpiar();
+  await control.procesar('Rossy Curiel desconectada');
+  check('"Rossy Curiel desconectada" libera el 42 y llama a Erika en Eléctricos (sin que nadie escriba "mando a…")', cj('42').ocupado === false && E.length === 1 && E[0].m === '5215500000201' && /ya hay un lugar/.test(E[0].t), JSON.stringify({ E, P }));
+  limpiar();
+  await control.procesar('Libre 42');
+  check('el "Libre 42" que llega 3 s después NO vuelve a llamar a nadie', E.length === 0, JSON.stringify(E));
+  mock.timers.setTime(Date.UTC(2026, 10, 23, 15, 38, 0));            // 9:38
+  limpiar();
+  await control.procesar('42\nEricka Rodríguez conectada 9:38 a 12:38');
+  check('"42 / Ericka Rodríguez conectada 9:38 a 12:38" ocupa el 42 y saca a Erika de la fila', cj('42').ocupado && cj('42').usuario_actual === 'Ericka Rodríguez' && cj('42').numero_actual === '5215500000201' && db.getEstado().fila.length === 2, JSON.stringify([cj('42').usuario_actual, db.getEstado().fila.map(function(u) { return u.nombre; })]));
+  mock.timers.setTime(Date.UTC(2026, 10, 23, 15, 48, 0));            // 9:48
+  limpiar();
+  await control.procesar('Eugenia César \nDesconectada');
+  check('"Eugenia César / Desconectada" (2 líneas) libera el 44 y llama a Jonathan Olmos', cj('44').ocupado === false && E.length === 1 && E[0].m === '5215500000202', JSON.stringify({ E, P }));
+  limpiar();
+  await control.procesar('Libre 44');
+  check('"Libre 44" repetido no duplica el llamado', E.length === 0, JSON.stringify(E));
+
+  console.log('\n"Libre N" sobre un cajón que el bot tenía libre (no se enteró de la conexión) → igual llama a la fila');
+  await reset();
+  await db.agregarFila('5215500000301', 'Pablo Ruiz');
+  await db.agregarFila('5215500000302', 'Carla Soto');
+  limpiar();
+  await control.procesar('Libre 41');
+  check('llama a Pablo para el 41 y avisa a Proyecto Bot que no le había llegado la conexión', E.length === 1 && E[0].m === '5215500000301' && P.some(function(t) { return /no me llegó su conexión/.test(t) && /41/.test(t); }), JSON.stringify({ E, P }));
+  limpiar();
+  await control.procesar('Libre 41');
+  check('segundo "Libre 41": ya hay llamado vigente para ese cajón, no llama a Carla', E.length === 0 && P.some(function(t) { return /Ya estaba libre/.test(t); }), JSON.stringify({ E, P }));
+  await control.procesar('Libre 42');
+  check('"Libre 42" (otro cajón libre) sí llama a la siguiente: Carla', E.length === 1 && E[0].m === '5215500000302', JSON.stringify(E));
+  await reset();
+  await db.agregarFila('5215500000401', 'Ana Pérez');
+  limpiar();
+  await control.procesar('Libre 46');
+  check('"Libre 46" (VIP cerrado) no llama a la fila', E.length === 0, JSON.stringify(E));
+  await reset();
+  limpiar();
+  await control.procesar('Libre 48');
+  check('sin nadie en la fila: no llama a nadie y dice que ya estaba libre', E.length === 0 && P.some(function(t) { return /Ya estaba libre/.test(t); }), JSON.stringify({ E, P }));
+
+  console.log('\nDos cajones liberados con segundos de diferencia (9:48 real): no se llama dos veces a la misma persona');
+  await reset();
+  await db.agregarFila('5215500000501', 'Jonathan Olmos');
+  await db.agregarFila('5215500000502', 'Alfonso Moguel');
+  await db.conectarUsuario('44', 'Eugenia César', null, null);
+  await db.conectarUsuario('49', 'Erick Palomec', null, null);
+  limpiar();
+  await control.procesar('Eugenia César desconectada');
+  await control.procesar('Libre 44');
+  await control.procesar('Erick Palomec desconectado');
+  await control.procesar('Libre 49');
+  check('44 → Jonathan, 49 → Alfonso (cada uno una sola vez)', E.length === 2 && E[0].m === '5215500000501' && E[1].m === '5215500000502', JSON.stringify(E));
+
   console.log('\nResultado: ' + ok + '/' + (ok + fail) + ' ✅  ' + fail + ' ❌');
   mock.timers.reset();
   process.exit(fail ? 1 : 0);

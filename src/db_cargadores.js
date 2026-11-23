@@ -594,6 +594,21 @@ function getLlamadoActivo(numero) {
   return { numero: k, cajon: ll.cajon, nombre: ll.nombre, fase: 'llamado', desde: ll.hora };
 }
 
+// ¿Ya hay alguien llamado (o con ventana de 15 min) para ESTE cajón? Evita llamar dos veces por el mismo cajón libre.
+function hayLlamadoParaCajon(cajon) {
+  cajon = String(cajon);
+  const c = estado.cargadores[cajon];
+  if (c && !c.ocupado && c.timer_conexion && c.timer_conexion.activo) return true;
+  const p = estado.pendiente;
+  if (p && String(p.cargador_id) === cajon) return true;
+  return Object.keys(estado.llamados || {}).some(function(k) {
+    const ll = estado.llamados[k];
+    if (String(ll.cajon) !== cajon) return false;
+    if (tiempo.ahoraMs() - new Date(ll.hora).getTime() > MS_LLAMADO_VIGENTE) return false;
+    return estado.fila.some(function(u) { return u.numero === k; });
+  });
+}
+
 // TIEMPO ESTIMADO
 function tiempoEstimado(posicion) {
   const libres = numLibres();
@@ -675,7 +690,7 @@ module.exports = {
   iniciarTimerConexion, extenderTimerConexion, confirmarConexion, liberarCajon,
   conectarUsuario, buscarCajonDeUsuario, buscarEnFila,
   cargarEstadoInicial, ocupantes, renombrarOcupante, ajustarInicio, marcarTiempoCumplido, marcarAlertaVencido, marcarRecordatorios, cargarGrupos, guardarGrupos, cargarSilencio, guardarSilencio,
-  setPendiente, getPendiente, marcarLlamado, limpiarLlamado, limpiarLlamadosCajon, getLlamadoActivo,
+  setPendiente, getPendiente, marcarLlamado, limpiarLlamado, limpiarLlamadosCajon, getLlamadoActivo, hayLlamadoParaCajon,
   resumenFila, resumenCargadores, resumenCompleto, resumenListaEstatica,
   bitacoraFila, renombrarEnFila, getAlias, buscarEnEstatica, renombrarEnEstatica, anotarManual, moverEnFila, posicionMinima, esManual, buscarEnFilaTolerate,
   MS_CONEXION, MS_SESION, MS_SESION_VIP, CAJONES, CAJONES_VIP

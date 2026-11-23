@@ -177,9 +177,18 @@ function crear(deps) {
     await db.liberarCajon(cajon);
     // Cajones VIP (46/50): no se ofrecen a la fila general mientras un admin no los abra
     if (db.CAJONES_VIP.has(cajon) && !db.vipAbierto()) { console.log('[CONTROL] Cajón VIP ' + cajon + ' liberado; no se llama a la fila'); return true; }
-    await llamarAlSiguiente(cajon, llamados);
+    await llamarAlSiguiente(cajon, llamados, { saltarLlamados: true });   // quien ya fue llamado a OTRO cajón no se llama dos veces
     console.log('[CONTROL] Desconexión cajón ' + cajon);
     return true;
+  }
+
+  // "N libre" del ayudante sobre un cajón que mi registro ya tenía libre: llama a la fila si nadie tiene ya ese cajón.
+  async function llamarSiLibreReportado(cajon, llamados) {
+    const c = db.getEstado().cargadores[cajon];
+    if (!c || c.ocupado) return null;
+    if (db.CAJONES_VIP.has(cajon) && !db.vipAbierto()) return null;
+    if (db.hayLlamadoParaCajon(cajon)) return null;
+    return await llamarAlSiguiente(cajon, llamados, { saltarLlamados: true });
   }
 
   // Llama a la siguiente persona de la fila para un cajón libre. `llamados` = personas que no deben repetirse.
@@ -257,14 +266,21 @@ function crear(deps) {
 
   // "41 libre", "41 y 42 libres": libera y responde en Proyecto Bot lo que hizo
   async function libre(ev) {
-    const llamados = {}, liberados = [], yaLibres = [], avisos = [];
+    const llamados = {}, liberados = [], yaLibres = [], llamadosExtra = [], avisos = [];
     for (const cajon of ev.cajones) {
       const previo = db.getEstado().cargadores[cajon];
       const quien = previo && previo.usuario_actual ? previo.usuario_actual : null;
       if (await liberarYLlamar(cajon, llamados)) liberados.push(cajon + (quien ? ' (' + quien + ')' : ''));
-      else { yaLibres.push(cajon); console.log('[CONTROL] Cajón ' + cajon + ' ya estaba libre'); }
+      else {
+        // El ayudante es la verdad: si dice "libre" y mi registro ya lo tenía libre (no me enteré de la conexión),
+        // igual se llama a la fila, salvo que ya haya un llamado vigente para ese cajón.
+        const sig = await llamarSiLibreReportado(cajon, llamados);
+        if (sig) { llamadosExtra.push(cajon + ' → ' + sig.nombre); console.log('[CONTROL] Cajón ' + cajon + ' libre por reporte (no estaba ocupado en mi registro); llamado ' + sig.nombre); }
+        else { yaLibres.push(cajon); console.log('[CONTROL] Cajón ' + cajon + ' ya estaba libre'); }
+      }
     }
     if (liberados.length) avisos.push('✅ Liberado' + (liberados.length > 1 ? 's' : '') + ' por reporte del ayudante: cajón ' + liberados.join(', ') + '.');
+    if (llamadosExtra.length) avisos.push('ℹ️ El ayudante reporta libre un cajón que yo tenía libre (no me llegó su conexión). Llamé a la fila: ' + llamadosExtra.join(', ') + '.');
     if (yaLibres.length) avisos.push('ℹ️ Ya estaba' + (yaLibres.length > 1 ? 'n' : '') + ' libre' + (yaLibres.length > 1 ? 's' : '') + ' en mi registro: ' + yaLibres.join(', ') + '.');
     (ev.invalidos || []).forEach(function(n) {
       const s = sugerirCajon(n, ev.cajones);
