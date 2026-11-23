@@ -3,9 +3,8 @@
 const ayudante = require('./ayudante');
 const declina = require('./declina');
 
-const MS_RECORDATORIO = 15 * 60 * 1000;
 const MS_AVISO_DISPONIBLES = 10 * 60 * 1000;
-const MAX_RECORDATORIOS = 3;   // automáticos al cumplir el tiempo; después se alerta a admins
+const MS_ALERTA_VENCIDO = 15 * 60 * 1000;   // tras el mensaje de "tiempo vencido", si no hay desconexión confirmada se alerta a Alma
 
 function crear(deps) {
   const db = deps.db, timers = deps.timers, tiempo = deps.tiempo;
@@ -16,113 +15,104 @@ function crear(deps) {
   // Aviso automático a admins: fuera de horario se junta en un resumen para las 7:00 (lo implementa index.js)
   const avisoDiferible = deps.avisoDiferible || proyectoBot;
 
-  // ── Recordatorio de desconexión (un solo mensaje para todos los pendientes, cada 15 min)
-  const pendientes = {};          // clave normalizada → { nombre, numero, cajon }
-  let intervalo = null;
+  // ── Tiempo vencido (etapa1c-7): el usuario recibe SOLO 2 mensajes ("faltan 15 minutos" y "tu tiempo ya se venció").
+  // No hay más recordatorios. Si 15 min después del vencimiento el ayudante no reportó la desconexión, se ALERTA A ALMA.
+  // Alertas: L–V a cualquier hora (directo a Proyecto Bot); sábado/domingo se difieren al resumen del lunes.
+  const alertasVencido = {};      // cajón → timeout de la alerta a Alma
+  const dijoDesconectado = {};    // cajón → texto del usuario ("ya me desconecté"): se cita en la alerta
+  const avisadoRecordar = {};     // cajón → ms del último aviso "el ayudante pidió desconectar"
+  const avisadoRespuesta = {};    // cajón|vencimiento → true
+  const avisadoPorNombre = {};    // cajón|nombre → true: un aviso por nombre de WhatsApp es suficiente
   let ultimoAvisoDisponibles = 0;
 
-  function texto(personas) {
-    if (personas.length === 1) {
-      const p = personas[0];
-      return (p.numero ? p.nombre + ' @' + p.numero : p.nombre) + ' por favor desconecta tu vehículo, el tiempo de carga ha terminado 🙏';
-    }
-    return personas.map(function(p) { return p.numero ? p.nombre + ' @' + p.numero : p.nombre; }).join(', ') +
-      ' por favor desconecten su vehículo, el tiempo de carga ha terminado 🙏';
+  // Alerta a las supervisoras: L–V siempre; fin de semana → resumen diferido
+  async function avisoAlma(texto) {
+    const d = tiempo.diaSemanaMex();
+    if (d === 0 || d === 6) return avisoDiferible(texto);
+    return proyectoBot(texto);
   }
 
-  // Devuelve true solo si de verdad se mandó (fuera de horario / silencio no cuenta como enviado)
-  async function enviarRecordatorio(personas) {
-    if (!personas.length) return false;
-    if (!puedeElectricos()) return false;
-    const menciones = personas.filter(function(p) { return p.numero; }).map(function(p) { return p.numero; });
-    await electricos(texto(personas), menciones.length ? menciones : null);
-    return true;
+  function textoVencido(p) {
+    return (p.numero ? p.nombre + ' @' + p.numero : p.nombre) + ' por favor desconecta tu vehículo, el tiempo de carga ha terminado 🙏';
   }
 
-  function sigueConectado(p) {
-    return ayudante.buscarPorNombre(p.nombre, db.ocupantes()).length > 0;
-  }
-
-  async function tick() {
-    if (!puedeElectricos()) return;   // pausa: no se envía, no se cuenta y no se alerta; se retoma al volver el horario
-    const vigentes = [], alertas = [];
-    for (const k of Object.keys(pendientes)) {
-      const p = pendientes[k];
-      if (!sigueConectado(p)) { delete pendientes[k]; continue; }
-      if (p.max && p.enviados >= p.max) {
-        alertas.push(p);
-        delete pendientes[k];
-        if (p.cajon) await db.marcarRecordatorios(p.cajon, p.max + 1);   // marca "ya alertado"
-        continue;
-      }
-      vigentes.push(p);
-    }
-    if (vigentes.length) {
-      await enviarRecordatorio(vigentes);
-      for (const p of vigentes) {
-        p.enviados = (p.enviados || 0) + 1;
-        if (p.max && p.cajon) await db.marcarRecordatorios(p.cajon, p.enviados);
-      }
-    }
-    for (const p of alertas) {
-      await avisoDiferible('🚨 *' + p.nombre + '* (cajón ' + p.cajon + ') sigue sin desconectarse tras ' + p.max + ' recordatorios. ' +
-        'Pasen a revisar. Cuando se desconecte: *' + p.cajon + ' libre* en Control.');
-    }
-    if (!Object.keys(pendientes).length) detenerIntervalo();
-  }
-
-  function detenerIntervalo() { if (intervalo) { clearInterval(intervalo); intervalo = null; } }
-
-  async function iniciarRecordatorios(personas) {
-    const enviado = await enviarRecordatorio(personas);
-    personas.forEach(function(p) { p.enviados = enviado ? 1 : 0; if (!p.sinCajon) pendientes[ayudante.normalizar(p.nombre)] = p; });   // sinCajon: un solo envío
-    if (enviado) { for (const p of personas) { if (p.max && p.cajon) await db.marcarRecordatorios(p.cajon, 1); } }
-    if (!intervalo) intervalo = setInterval(function() { tick().catch(function(e) { console.log('[control] tick:', e.message); }); }, MS_RECORDATORIO);
-    console.log('[recordatorio] ' + (enviado ? 'Iniciado' : 'En pausa (fuera de horario o silencio)') + ' para ' + personas.map(function(p) { return p.nombre; }).join(', '));
-    return enviado;
-  }
-
-  function cancelarRecordatorio(nombre) {
-    const k = ayudante.normalizar(nombre);
-    if (pendientes[k]) { delete pendientes[k]; console.log('[recordatorio] Cancelado para ' + nombre); }
-    if (!Object.keys(pendientes).length) detenerIntervalo();
-  }
-
-  // ── Respuesta de un usuario en Eléctricos a su recordatorio ("ya me desconecté", "sí", "ok").
-  // El AYUDANTE es la fuente de verdad: esto NUNCA libera el cajón. Solo (a) detiene los recordatorios si sabemos
-  // con certeza quién es (coincide su número) y (b) avisa a Proyecto Bot para que el ayudante confirme.
-  // Si no tenemos su número (cargado por reporte), solo se avisa y NO se detienen recordatorios (podría ser otra persona).
   function soloDigitos(x) { return String(x || '').replace(/@.*$/, '').replace(/\D/g, ''); }
+
+  function cancelarAlertaCajon(cajon) {
+    cajon = String(cajon);
+    if (alertasVencido[cajon]) { clearTimeout(alertasVencido[cajon]); delete alertasVencido[cajon]; }
+    delete dijoDesconectado[cajon];
+    Object.keys(avisadoRecordar).forEach(function(k) { if (k.indexOf(cajon + '|') === 0) delete avisadoRecordar[k]; });
+  }
+  // Compatibilidad: cancela por nombre de quien ocupa un cajón
+  function cancelarRecordatorio(nombre) {
+    ayudante.buscarPorNombre(nombre, db.ocupantes()).forEach(function(o) { cancelarAlertaCajon(o.id); });
+  }
+  function detenerIntervalo() {
+    Object.keys(alertasVencido).forEach(function(k) { clearTimeout(alertasVencido[k]); delete alertasVencido[k]; });
+    [dijoDesconectado, avisadoRecordar, avisadoRespuesta, avisadoPorNombre].forEach(function(o) { Object.keys(o).forEach(function(k) { delete o[k]; }); });
+  }
+
+  function programarAlertaVencido(cajon, cumplidoEnMs) {
+    cajon = String(cajon);
+    if (alertasVencido[cajon]) clearTimeout(alertasVencido[cajon]);
+    const espera = Math.max(0, cumplidoEnMs + MS_ALERTA_VENCIDO - tiempo.ahoraMs());
+    alertasVencido[cajon] = setTimeout(function() { dispararAlertaVencido(cajon).catch(function(e) { console.log('[control] alerta vencido:', e.message); }); }, espera);
+  }
+
+  async function dispararAlertaVencido(cajon) {
+    cajon = String(cajon);
+    delete alertasVencido[cajon];
+    const c = db.getEstado().cargadores[cajon];
+    if (!c || !c.ocupado || !c.timer_sesion || !c.timer_sesion.cumplido || c.alerta_vencido) return;   // ya se desconectó, o ya se alertó
+    const espera = db.getEstado().fila.length;
+    const dijo = dijoDesconectado[cajon];
+    await avisoAlma('🚨 *' + c.usuario_actual + '* (cajón ' + cajon + ') sigue conectado 15 min después de vencer su tiempo' +
+      (c.cumplido_en ? ' (terminó a las ' + tiempo.horaLocal(c.cumplido_en) + ')' : '') + '.' +
+      (dijo ? ' El usuario escribió «' + dijo + '», pero falta la confirmación del ayudante.' : '') +
+      '\n*Alma: llama a la persona.* Cuando se desconecte, el ayudante reporta *' + cajon + ' libre* o *Se desconecta ' + c.usuario_actual + '* en Control.' +
+      (espera ? ' · En fila: ' + espera : ''));
+    await db.marcarAlertaVencido(cajon);
+    delete dijoDesconectado[cajon];
+  }
+
+  // ── Respuesta de un usuario en Eléctricos a su aviso de "tiempo vencido" ("ya me desconecté", "sí", "ok").
+  // El AYUDANTE es la fuente de verdad: esto NUNCA libera el cajón. Solo avisa a Alma (una vez por vencimiento) y queda
+  // citado en la alerta de los 15 min. Si no tenemos su número (cargado por reporte) solo avisa cuando dice que YA se desconectó.
   const RE_YA_DESCONECTE = /\bdesconect(?:e|o|ado|ada)\b/;
   const RE_NEGACION = /\b(no|aun|todavia|falta|cuando|despues|luego|en un rato)\b/;
   const RE_ACUSE = /^(si+|ok|okay|vale|listo|lista|enterado|enterada|gracias|de acuerdo|ahorita|ya voy|voy|ya mero|ya)$/;
-  const avisadoPorNombre = {};   // cajón → true: un aviso por nombre de WhatsApp es suficiente
+  function vencidos() {
+    return db.ocupantes().filter(function(o) { const c = db.getEstado().cargadores[o.id]; return c && c.timer_sesion && (c.timer_sesion.cumplido || c.timer_sesion.vencido); });
+  }
   async function respuestaUsuario(numero, nombreWa, textoMsg) {
     const t = ayudante.normalizar(textoMsg);
     if (!t || t.split(' ').length > 8) return false;
     const dice = RE_NEGACION.test(t) ? null : (RE_YA_DESCONECTE.test(t) ? 'desconectado' : (RE_ACUSE.test(t) ? 'acuse' : null));
     if (!dice) return false;
-    const lista = Object.keys(pendientes).map(function(k) { return pendientes[k]; }).filter(function(p) { return p.cajon && !p.sinCajon; });
+    const lista = vencidos();
     if (!lista.length) return false;
     const dn = soloDigitos(numero);
-    let p = dn ? lista.find(function(x) { return x.numero && soloDigitos(x.numero) === dn; }) : null;
+    const p = dn ? lista.find(function(x) { return x.numero && soloDigitos(x.numero) === dn; }) : null;
     const citado = String(textoMsg).trim().substring(0, 60);
     if (p) {
-      cancelarRecordatorio(p.nombre);
-      await db.marcarRecordatorios(p.cajon, (p.max || MAX_RECORDATORIOS) + 1);   // "ya atendido": no se reanudan tras un reinicio
-      await avisoDiferible('🔔 *' + p.nombre + '* (cajón ' + p.cajon + ') respondió en Eléctricos «' + citado + '». ' +
-        'Detuve sus recordatorios, pero el cajón sigue ocupado en mi registro: el ayudante debe confirmarlo con *Se desconecta ' + p.nombre + '* o *' + p.cajon + ' libre*. ' +
-        'Si en realidad no se ha desconectado, el ayudante puede pedirlo otra vez con *Se tiene que desconectar ' + p.nombre + '*.');
+      if (dice === 'desconectado') dijoDesconectado[p.id] = citado;
+      const c = db.getEstado().cargadores[p.id];
+      const k = p.id + '|' + (c.cumplido_en || c.hora_inicio || '');
+      if (avisadoRespuesta[k]) return true;
+      avisadoRespuesta[k] = true;
+      await avisoAlma('🔔 *' + p.nombre + '* (cajón ' + p.id + ') respondió en Eléctricos «' + citado + '». ' +
+        'El cajón sigue ocupado en mi registro: el ayudante debe confirmarlo con *Se desconecta ' + p.nombre + '* o *' + p.id + ' libre*.');
       return true;
     }
     // Sin número registrado: solo si dice que YA se desconectó y su nombre de WhatsApp apunta a una única persona sin teléfono
     if (dice !== 'desconectado' || !nombreWa) return false;
     const sinNum = lista.filter(function(x) { return !x.numero; });
-    const m = ayudante.buscarPorNombre(nombreWa, sinNum.map(function(x) { return { id: x.cajon, nombre: x.nombre }; }));
-    if (m.length !== 1 || avisadoPorNombre[m[0].id]) return false;
-    avisadoPorNombre[m[0].id] = true;
-    await avisoDiferible('🔔 «' + nombreWa + '» escribió en Eléctricos «' + citado + '». Podría ser *' + m[0].nombre + '* (cajón ' + m[0].id + ', sin teléfono registrado), ' +
-      'por eso NO detuve sus recordatorios. El ayudante debe confirmar con *Se desconecta ' + m[0].nombre + '* o *' + m[0].id + ' libre*.');
+    const m = ayudante.buscarPorNombre(nombreWa, sinNum.map(function(x) { return { id: x.id, nombre: x.nombre }; }));
+    if (m.length !== 1 || avisadoPorNombre[m[0].id + '|' + m[0].nombre]) return false;
+    avisadoPorNombre[m[0].id + '|' + m[0].nombre] = true;
+    await avisoAlma('🔔 «' + nombreWa + '» escribió en Eléctricos «' + citado + '». Podría ser *' + m[0].nombre + '* (cajón ' + m[0].id + ', sin teléfono registrado). ' +
+      'El ayudante debe confirmar con *Se desconecta ' + m[0].nombre + '* o *' + m[0].id + ' libre*.');
     return true;
   }
 
@@ -181,7 +171,7 @@ function crear(deps) {
   async function liberarYLlamar(cajon, llamados) {
     const c = db.getEstado().cargadores[cajon];
     if (!c || (!c.ocupado && !(c.timer_conexion && c.timer_conexion.activo))) return false;
-    if (c.usuario_actual) cancelarRecordatorio(c.usuario_actual);
+    cancelarAlertaCajon(cajon);
     timers.cancelarTimerConexion(cajon);
     timers.cancelarTimerSesion(cajon);
     await db.liberarCajon(cajon);
@@ -304,20 +294,31 @@ function crear(deps) {
     if (avisos.length) await proyectoBot(avisos.join('\n'));
   }
 
-  // "se tiene que desconectar X": el ayudante PIDE recordar. Máximo 3 recordatorios y luego alerta a admins.
+  // "se tiene que desconectar X": el ayudante pide que se le recuerde a alguien. Ya NO se le escribe al usuario:
+  // se avisa a Alma (escalación). Un aviso por persona cada 15 min.
   async function recordar(ev) {
     const ocup = db.ocupantes();
-    const personas = [], noEncontrados = [], ambiguos = [];
+    const avisadas = [], noEncontrados = [], ambiguos = [];
+    const ahora = tiempo.ahoraMs();
     ev.nombres.forEach(function(n) {
       const m = ayudante.buscarPorNombre(n, ocup);
-      if (m.length === 1) personas.push({ nombre: m[0].nombre, numero: m[0].numero, cajon: m[0].id, max: MAX_RECORDATORIOS });
+      if (m.length === 1) {
+        const clave = m[0].id + '|' + m[0].nombre;   // por persona: si el cajón cambia de ocupante, no hereda el aviso anterior
+        const ult = avisadoRecordar[clave];
+        if (ult && ahora - ult < MS_ALERTA_VENCIDO) return;
+        avisadoRecordar[clave] = ahora;
+        avisadas.push(m[0]);
+      }
       else if (m.length === 0) noEncontrados.push(n);
       else ambiguos.push(n + ' → ' + m.map(function(x) { return x.nombre + ' (cajón ' + x.id + ')'; }).join(' / '));
     });
-    if (personas.length) await iniciarRecordatorios(personas);
+    if (avisadas.length) {
+      await avisoAlma('🔔 El ayudante pidió que se desconecte: ' + avisadas.map(function(o) { return '*' + o.nombre + '* (cajón ' + o.id + ')'; }).join(', ') +
+        '.\n*Alma: avisa tú a la persona.* (Ya no le escribo yo al usuario.) Cuando se desconecte: *N libre* o *Se desconecta Nombre* en Control.');
+    }
     const avisos = [];
-    if (noEncontrados.length) avisos.push('⚠️ No encontré en los cajones: ' + noEncontrados.join(', ') + '. No envié recordatorio.');
-    if (ambiguos.length) avisos.push('⚠️ Nombre ambiguo, no envié recordatorio:\n' + ambiguos.join('\n'));
+    if (noEncontrados.length) avisos.push('⚠️ No encontré en los cajones: ' + noEncontrados.join(', ') + '. No avisé a Alma.');
+    if (ambiguos.length) avisos.push('⚠️ Nombre ambiguo, no avisé a Alma:\n' + ambiguos.join('\n'));
     if (avisos.length) await proyectoBot(avisos.join('\n'));
   }
 
@@ -331,27 +332,34 @@ function crear(deps) {
       'Si hay diferencia, que el ayudante mande *N libre* o *Se conecta ...*, o pega el reporte de cajones.');
   }
 
-  // El timer de sesión llegó a 3 h (8 h VIP): recordatorio automático, el cajón sigue ocupado
+  // El timer de sesión llegó a 3 h (8 h VIP): UN mensaje al usuario (si se puede escribir) y alerta a Alma a los 15 min.
+  // El cajón sigue ocupado. Fuera de horario / silencio el mensaje NO se manda ni se reintenta al día siguiente.
   async function sesionCumplida(info) {
-    const enviado = await iniciarRecordatorios([{ nombre: info.nombre, numero: info.numero, cajon: info.cajon, max: MAX_RECORDATORIOS }]);
+    const cajon = String(info.cajon);
+    let enviado = false;
+    if (puedeElectricos()) {
+      await electricos(textoVencido(info), info.numero ? [info.numero] : null);
+      enviado = true;
+    }
     const espera = db.getEstado().fila.length;
-    await avisoDiferible('⏰ *' + info.nombre + '* cumplió su tiempo en cajón ' + info.cajon + '. Sigue ocupado hasta que el ayudante reporte *' + info.cajon + ' libre*.\n' +
-      (enviado ? 'Recordatorios: 1/' + MAX_RECORDATORIOS + ' enviado en Eléctricos' : 'Recordatorios en pausa (fuera de horario o silencio): no se ha enviado nada') + (espera ? ' · En fila: ' + espera : '') + '.');
+    await avisoDiferible('⏰ *' + info.nombre + '* cumplió su tiempo en cajón ' + cajon + '. Sigue ocupado hasta que el ayudante reporte *' + cajon + ' libre*.\n' +
+      (enviado ? 'Le avisé en Eléctricos (único aviso).' : 'No le escribí en Eléctricos (fuera de horario o silencio).') +
+      ' Si en 15 min no hay desconexión, te alerto.' + (espera ? ' · En fila: ' + espera : ''));
+    const c = db.getEstado().cargadores[cajon];
+    programarAlertaVencido(cajon, c && c.cumplido_en ? new Date(c.cumplido_en).getTime() : tiempo.ahoraMs());
   }
 
-  // Tras un reinicio del bot: retoma los recordatorios automáticos que quedaron a medias
+  // Tras un reinicio del bot: retoma las alertas a Alma que estaban pendientes (si ya pasaron los 15 min, sale ya, una sola vez)
   function reanudarRecordatorios() {
     let n = 0;
     db.ocupantes().forEach(function(o) {
       const c = db.getEstado().cargadores[o.id];
-      if (!c.timer_sesion || !c.timer_sesion.cumplido) return;
-      const enviados = c.recordatorios || 0;
-      if (enviados > MAX_RECORDATORIOS) return;   // ya se alertó a los admins
-      pendientes[ayudante.normalizar(o.nombre)] = { nombre: o.nombre, numero: o.numero, cajon: o.id, max: MAX_RECORDATORIOS, enviados: enviados };
+      if (!c.timer_sesion || !c.timer_sesion.cumplido || c.alerta_vencido) return;
+      if ((c.recordatorios || 0) > 3) return;   // estado anterior a etapa1c-7: ya se había alertado a los admins
+      programarAlertaVencido(o.id, c.cumplido_en ? new Date(c.cumplido_en).getTime() : tiempo.ahoraMs() - MS_ALERTA_VENCIDO);
       n++;
     });
-    if (n && !intervalo) intervalo = setInterval(function() { tick().catch(function(e) { console.log('[control] tick:', e.message); }); }, MS_RECORDATORIO);
-    console.log('[control] Recordatorios reanudados: ' + n);
+    console.log('[control] Alertas de vencimiento reanudadas: ' + n);
     return n;
   }
 
@@ -388,7 +396,7 @@ function crear(deps) {
     return true;
   }
 
-  return { procesar, respuestaUsuario, noPuedeBajar, ajustarInicio, sesionCumplida, reanudarRecordatorios, cancelarRecordatorio, _pendientes: pendientes, _avisadoCorto: avisadoCorto, _detener: detenerIntervalo };
+  return { procesar, respuestaUsuario, noPuedeBajar, ajustarInicio, sesionCumplida, reanudarRecordatorios, cancelarRecordatorio, _pendientes: alertasVencido, _avisadoCorto: avisadoCorto, _detener: detenerIntervalo };
 }
 
 module.exports = { crear };

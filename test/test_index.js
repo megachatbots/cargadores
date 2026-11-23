@@ -123,7 +123,7 @@ const ultimo = function(a) { const l = en(a); return l[l.length - 1] || ''; };
   await msg('c', OTRO, 'Se conecta\nCajón 41\nVíctor Ojeda\n33G579 Tesla\n5:45 A 8:45');
   for (let i = 0; i < 12; i++) await avanzar(15 * MIN);          // hasta 22:30 (el corte es a las 20:00)
   check('desde las 20:00 no sale NADA a Eléctricos', en('e').length === 0, JSON.stringify(en('e')));
-  check('de noche no sale ningún aviso a Proyecto Bot (solo se juntan)', en('p').length === 0, JSON.stringify(en('p')));
+  check('de noche solo sale la alerta 🚨 a Proyecto Bot (15 min después de vencer); el resto se junta', en('p').length === 1 && /sigue conectado 15 min después/.test(en('p')[0]), JSON.stringify(en('p')));
   const rec = db.getEstado().cargadores['41'].recordatorios || 0;
   check('los recordatorios bloqueados NO se cuentan como enviados', rec === 0, 'recordatorios=' + rec);
   while (!(tiempo.partesMex(Date.now()).h === 7 && tiempo.partesMex(Date.now()).mi >= 15)) await avanzar(15 * MIN);   // hasta las 7:15 del viernes (cruza la medianoche)
@@ -137,6 +137,7 @@ const ultimo = function(a) { const l = en(a); return l[l.length - 1] || ''; };
   await db.agregarFila(CIT, 'Citlali Guzmán');
   await msg('c', OTRO, 'Se conecta\nCajón 45\nCitlali Guzmán\n11A111 BYD\n7:00 A 10:00');
   await msg('c', OTRO, 'Se tiene que desconectar Citlali');
+  while (tiempo.partesMex(Date.now()).h < 10) await avanzar(15 * MIN);   // ya pasó su hora (10:00): su tiempo está cumplido
   limpiar();
   await msg('e', CIT, 'Ya me desconecté desde hace rato');
   check('su respuesta en Eléctricos avisa a Proyecto Bot y pide confirmación del ayudante', /Citlali Guzmán.*respondió/.test(ultimo('p')) && /ayudante debe confirmarlo/.test(ultimo('p')), ultimo('p'));

@@ -149,46 +149,61 @@ const cj = function(n) { return db.getEstado().cargadores[n]; };
   m = await control.ajustarInicio('48', '1.30');
   check('acepta "1.30" con punto', /✅/.test(m), m);
 
-  console.log('\n11) Tiempo cumplido: 3 recordatorios cada 15 min y luego alerta a admins; el cajón sigue ocupado');
+  console.log('\n11) Tiempo cumplido (etapa1c-7): UN solo mensaje al usuario; a los 15 min sin desconexión → alerta a Alma; el cajón sigue ocupado');
   await reset();
   await db.conectarUsuario('44', 'Arturo Montaño', '777', tiempo.horaLaboralAISO('11:45'));   // termina 2:45 p.m.
   await db.agregarFila('888', 'Alix Córdova');
   await timers.reactivarTimerSesionCajon('44');
   await avanzar(15 * MIN + 1000);   // 14:45
-  check('2:45: primer recordatorio en Eléctricos con mención a 777', E.length === 1 && E[0].m.join() === '777' && /Arturo Montaño @777 por favor desconecta/.test(E[0].t), JSON.stringify(E));
-  check('2:45: Proyecto Bot informa 1/3 y que sigue ocupado; resumen marca ⏰', P.length === 1 && /1\/3/.test(P[0]) && /44 libre/.test(P[0]) && /tiempo cumplido/.test(db.resumenCargadores()), JSON.stringify(P));
-  check('2:45: el cajón sigue ocupado y NO se llama a Alix', cj('44').ocupado === true && db.getEstado().pendiente === null && !E.some(function(x) { return x.m === '888'; }));
-  check('contador persistido = 1', cj('44').recordatorios === 1, cj('44').recordatorios);
-  await avanzar(15 * MIN); await avanzar(15 * MIN);   // 3:00 y 3:15
-  check('3 recordatorios en total', E.filter(function(x) { return /desconecta/.test(x.t); }).length === 3, E.length);
+  check('2:45: UN mensaje en Eléctricos con mención a 777', E.length === 1 && E[0].m.join() === '777' && /Arturo Montaño @777 por favor desconecta/.test(E[0].t), JSON.stringify(E));
+  check('2:45: Proyecto Bot informa (único aviso, alerta en 15 min); resumen marca ⏰', P.length === 1 && /único aviso/.test(P[0]) && /44 libre/.test(P[0]) && /tiempo cumplido/.test(db.resumenCargadores()), JSON.stringify(P));
+  check('2:45: el cajón sigue ocupado, NO se llama a Alix, y queda guardada la hora de vencimiento', cj('44').ocupado === true && db.getEstado().pendiente === null && !E.some(function(x) { return x.m === '888'; }) && !!cj('44').cumplido_en);
   limpiar();
-  await avanzar(15 * MIN);   // 3:30
-  check('al cuarto turno NO hay otro recordatorio y se alerta a admins', E.length === 0 && P.length === 1 && /🚨/.test(P[0]) && /3 recordatorios/.test(P[0]) && /44 libre/.test(P[0]), JSON.stringify({ E, P }));
+  await avanzar(14 * MIN);   // 2:59
+  check('2:59: nada nuevo (ni segundo recordatorio ni alerta)', E.length === 0 && P.length === 0, JSON.stringify({ E, P }));
+  await avanzar(1 * MIN + 2000);   // 3:00 → 15 min después del vencimiento
+  check('3:00 (15 min después): alerta a Alma en Proyecto Bot, SIN escribir al usuario', E.length === 0 && P.length === 1 && /🚨/.test(P[0]) && /Arturo Montaño/.test(P[0]) && /Alma: llama a la persona/.test(P[0]) && /44 libre/.test(P[0]), JSON.stringify({ E, P }));
+  check('la alerta queda marcada (no se repite)', cj('44').alerta_vencido === true);
   limpiar();
-  await avanzar(60 * MIN);
-  check('después de la alerta no hay más mensajes', E.length === 0 && P.length === 0, JSON.stringify({ E, P }));
+  await avanzar(15 * MIN); await avanzar(15 * MIN); await avanzar(60 * MIN);
+  check('después: cero mensajes al usuario y cero alertas repetidas', E.length === 0 && P.length === 0, JSON.stringify({ E, P }));
   await control.procesar('44 libre');
   check('el ayudante reporta "44 libre" → se libera y ahora sí se llama a Alix', !cj('44').ocupado && E.length === 1 && E[0].m === '888', JSON.stringify(E));
 
-  console.log('\n12) Reinicio del bot a mitad de los recordatorios: se retoman sin reiniciar la cuenta');
+  console.log('\n11b) Si el ayudante confirma la desconexión antes de los 15 min, NO hay alerta');
   await reset();
   await db.conectarUsuario('42', 'Pablo Monsalvo', '999', tiempo.horaLaboralAISO('11:45'));
   await timers.reactivarTimerSesionCajon('42');
-  await avanzar(15 * MIN + 1000);          // primer recordatorio (1/3)
+  await avanzar(15 * MIN + 1000);   // vencimiento 2:45
+  await avanzar(5 * MIN);
   limpiar();
-  control._detener(); Object.keys(control._pendientes).forEach(function(k) { delete control._pendientes[k]; });   // "se cayó el bot"
-  const n = control.reanudarRecordatorios();
-  check('se reanuda 1 recordatorio pendiente', n === 1);
-  await avanzar(15 * MIN);
-  check('siguiente recordatorio sale en 15 min (2/3), no 1/3', E.length === 1 && cj('42').recordatorios === 2, JSON.stringify({ E, r: cj('42').recordatorios }));
-  await avanzar(15 * MIN);
-  check('tercer recordatorio (3/3)', cj('42').recordatorios === 3);
+  await control.procesar('Se desconecta\nPablo Monsalvo');
+  await avanzar(30 * MIN);
+  check('libre a los 5 min → sin alerta a Alma ni mensajes extra', !cj('42').ocupado && !P.some(function(t) { return /🚨/.test(t); }) && E.length === 0, JSON.stringify({ E, P }));
+
+  console.log('\n12) Reinicio del bot con la alerta a Alma pendiente: se retoma; si ya pasaron los 15 min sale una sola vez');
+  await reset();
+  await db.conectarUsuario('42', 'Pablo Monsalvo', '999', tiempo.horaLaboralAISO('11:45'));
+  await timers.reactivarTimerSesionCajon('42');
+  await avanzar(15 * MIN + 1000);          // vencimiento (2:45)
   limpiar();
-  await avanzar(15 * MIN);
-  check('luego alerta a admins una sola vez', P.length === 1 && /🚨/.test(P[0]) && cj('42').recordatorios === 4, JSON.stringify(P));
-  control._detener(); Object.keys(control._pendientes).forEach(function(k) { delete control._pendientes[k]; });
+  control._detener();                       // "se cayó el bot"
+  await avanzar(5 * MIN);
+  check('se reanuda 1 alerta pendiente', control.reanudarRecordatorios() === 1);
+  await avanzar(10 * MIN + 2000);           // completa los 15 min desde el vencimiento
+  check('la alerta sale a los 15 min desde el vencimiento (no 15 min desde el reinicio)', P.length === 1 && /🚨/.test(P[0]) && E.length === 0, JSON.stringify({ E, P }));
   limpiar();
   check('tras la alerta, un reinicio ya no reanuda nada', control.reanudarRecordatorios() === 0);
+  await reset();
+  await db.conectarUsuario('48', 'Tere Soto', '555', tiempo.horaLaboralAISO('11:45'));
+  await timers.reactivarTimerSesionCajon('48');
+  await avanzar(15 * MIN + 1000);
+  limpiar();
+  control._detener();
+  await avanzar(40 * MIN);                  // el bot estuvo caído 40 min
+  check('si al volver ya pasaron los 15 min: se reanuda y alerta de inmediato (una vez)', control.reanudarRecordatorios() === 1);
+  await avanzar(1000);
+  check('   · alerta inmediata', P.length === 1 && /🚨/.test(P[0]), JSON.stringify(P));
   control._detener();
 
   console.log('\n13) Evidencia real: confirmaciones del ayudante NO generan mensajes a Eléctricos');
@@ -206,17 +221,19 @@ const cj = function(n) { return db.getEstado().cargadores[n]; };
   check('4 horas después: cero mensajes (antes eran recordatorios cada 15 min)', E.length === 0, JSON.stringify(E));
   control._detener();
 
-  console.log('\n14) "se tiene que desconectar X" = RECORDATORIO: máximo 3 y alerta; no se manda por nombre a quien no está en cajones');
+  console.log('\n14) "Se tiene que desconectar X" (ayudante): YA NO se le escribe al usuario; se avisa a Alma (1 aviso por persona cada 15 min)');
   await reset();
   await db.conectarUsuario('44', 'Ana Pérez', '222');
   await control.procesar('Se tiene que desconectar Ana Pérez\nPedro Pérez');
-  check('recordatorio 1 solo a Ana; Pedro (no está en cajones) no recibe nada', E.length === 1 && String(E[0].m) === '222' && !/Pedro/.test(E[0].t), JSON.stringify(E));
-  check('admins avisados de Pedro', P.some(function(t) { return /Pedro Pérez/.test(t); }), JSON.stringify(P));
+  check('NO se escribe nada en Eléctricos', E.length === 0, JSON.stringify(E));
+  check('aviso a Alma por Ana (cajón 44) con "Alma: avisa tú"', P.some(function(t) { return /Ana Pérez/.test(t) && /cajón 44/.test(t) && /Alma: avisa tú/.test(t); }), JSON.stringify(P));
+  check('Pedro (no está en cajones) se informa aparte, sin aviso a Alma por él', P.some(function(t) { return /No encontré.*Pedro Pérez/.test(t); }) && !P.some(function(t) { return /Alma: avisa tú/.test(t) && /Pedro/.test(t); }), JSON.stringify(P));
   limpiar();
-  await avanzar(15 * MIN); await avanzar(15 * MIN); await avanzar(15 * MIN); await avanzar(15 * MIN);
-  const rec = E.filter(function(x) { return /desconecta/.test(x.t); }).length;
-  check('en total 3 recordatorios (1 inicial + 2) y luego se detiene', rec === 2, String(rec) + ' ' + JSON.stringify(E));
-  check('alerta 🚨 a admins', P.some(function(t) { return /🚨/.test(t); }), JSON.stringify(P));
+  await control.procesar('Se tiene que desconectar Ana Pérez');
+  check('si el ayudante repite a los pocos minutos, no se duplica el aviso', !P.some(function(t) { return /Alma: avisa tú/.test(t); }) && E.length === 0, JSON.stringify(P));
+  await avanzar(15 * MIN + 1000); limpiar();
+  await control.procesar('Se tiene que desconectar Ana Pérez');
+  check('pasados 15 min, un nuevo pedido sí avisa otra vez', P.some(function(t) { return /Alma: avisa tú/.test(t); }) && E.length === 0, JSON.stringify(P));
   control._detener();
 
   console.log('\nEntradas anotadas a mano (sin teléfono): no se mencionan en Eléctricos');
@@ -231,7 +248,7 @@ const cj = function(n) { return db.getEstado().cargadores[n]; };
   await control.procesar('Se conecta\nCajón 44\nPedro Manual\n22B222 Tesla\n2:00 A 5:00');
   check('si conecta Pedro Manual: sale de la fila y queda sin número (no habrá @manual_N)', db.getEstado().fila.length === 0 && cj('44').numero_actual === null, JSON.stringify(cj('44')));
 
-  console.log('\nPausa de recordatorios fuera de horario (puedeElectricos = false)');
+  console.log('\nVencimiento fuera de horario (puedeElectricos = false): al usuario NUNCA se le escribe (ni al volver el horario); la alerta a Alma sí sale');
   await reset();
   let puede = false;
   const control2 = crear({ db: db, timers: timers, tiempo: tiempo, puedeElectricos: function() { return puede; },
@@ -240,13 +257,27 @@ const cj = function(n) { return db.getEstado().cargadores[n]; };
   await control2.procesar('Se conecta\nCajón 41\nVíctor Ojeda\n33G579 Tesla\n11:00 A 2:00');
   await avanzar(60 * MIN);
   for (let i = 0; i < 8; i++) await avanzar(15 * MIN);
-  check('en pausa: no se envía ningún recordatorio ni se cuenta', E.length === 0 && (cj('41').recordatorios || 0) === 0, JSON.stringify({ E, rec: cj('41').recordatorios }));
-  check('en pausa: tampoco alerta 🚨', !P.some(function(t) { return /🚨/.test(t); }), JSON.stringify(P));
-  check('el aviso a admins dice la verdad (no afirma "1/3 enviado")', P.some(function(t) { return /en pausa/.test(t); }) && !P.some(function(t) { return /1\/3 enviado/.test(t); }), JSON.stringify(P));
+  check('en pausa: no se escribe nada al usuario', E.length === 0, JSON.stringify(E));
+  check('en pausa: la alerta a Alma SÍ sale (L–V a cualquier hora)', P.some(function(t) { return /🚨/.test(t) && /Víctor Ojeda/.test(t); }), JSON.stringify(P));
+  check('el aviso a admins dice la verdad (no afirma que se le avisó)', P.some(function(t) { return /No le escribí en Eléctricos/.test(t); }) && !P.some(function(t) { return /único aviso/.test(t); }), JSON.stringify(P));
   puede = true; limpiar();
-  await avanzar(15 * MIN);
-  check('al volver el horario se retoma: sale el recordatorio 1', E.length === 1 && /desconecta/.test(E[0].t), JSON.stringify(E));
+  await avanzar(60 * MIN);
+  check('al volver el horario NO se le manda el aviso atrasado', E.length === 0, JSON.stringify(E));
   control2._detener();
+
+  console.log('\nFin de semana: la alerta a Alma se difiere (resumen del lunes); entre semana sale directa');
+  await reset();
+  const D = [];
+  const control3 = crear({ db: db, timers: timers, tiempo: tiempo, avisoDiferible: async function(t) { D.push(t); },
+    enviarElectricos: async function(t, m) { E.push({ t: t, m: m }); }, enviarProyectoBot: async function(t) { P.push(t); }, procesarReporte: async function() {} });
+  timers.setOnSesionCumplida(control3.sesionCumplida);
+  mock.timers.setTime(Date.UTC(2026, 10, 7, 20, 30, 0));   // sábado 7 nov 14:30 México
+  await db.conectarUsuario('45', 'Sábado Uno', '123', tiempo.horaLaboralAISO('11:45'));
+  await timers.reactivarTimerSesionCajon('45');
+  await avanzar(15 * MIN + 1000); await avanzar(15 * MIN);
+  check('sábado: la alerta 🚨 va al resumen diferido, no directa a Proyecto Bot', D.some(function(t) { return /🚨/.test(t); }) && !P.some(function(t) { return /🚨/.test(t); }), JSON.stringify({ D, P }));
+  control3._detener();
+  timers.setOnSesionCumplida(control.sesionCumplida);
 
   console.log('\nCaso real 5 nov: "Citlali Guzmán desconectada / 1 cargador disponible" (antes no se detectó y siguieron los recordatorios)');
   await reset();
@@ -255,59 +286,66 @@ const cj = function(n) { return db.getEstado().cargadores[n]; };
   await db.agregarFila('5215500000007', 'Citlali Guzmán');
   await control.procesar('Se conecta\nCajón 45\nCitlali Guzmán\n11A111 BYD\n11:45 A 2:45');
   await control.procesar('Se tiene que desconectar Citlali');
-  check('hay recordatorio activo para Citlali (con su número, sacada de la fila)', Object.keys(control._pendientes).length === 1 && db.getEstado().fila.length === 1, JSON.stringify(Object.keys(control._pendientes)));
+  check('Citlali (con su número) quedó sacada de la fila y el pedido del ayudante no escribe al usuario', db.getEstado().fila.length === 1 && !E.some(function(x) { return /desconecta/.test(x.t); }), JSON.stringify(E));
   limpiar();
   await control.procesar('Citlali Guzmán desconectada\n1 cargador disponible');
   check('el cajón 45 queda libre', cj('45').ocupado === false, JSON.stringify(cj('45')));
-  check('se cancelan sus recordatorios', Object.keys(control._pendientes).length === 0);
   check('se llama a Pablo Pérez, el siguiente de la fila', E.some(function(x) { return /Pablo Pérez/.test(x.t) && /lugar disponible/.test(x.t); }), JSON.stringify(E));
   check('Proyecto Bot: "Liberado … cajón 45 (Citlali Guzmán)"', P.some(function(t) { return /Liberado.*45.*Citlali Guzmán/.test(t); }), JSON.stringify(P));
   check('"1 cargador disponible" coincide con el conteo del bot (se procesa DESPUÉS de liberar): sin falsa alarma', !P.some(function(t) { return /Control reporta/.test(t); }), JSON.stringify(P));
   limpiar();
   await avanzar(15 * MIN); await avanzar(15 * MIN);
-  check('ya no salen recordatorios a Citlali', !E.some(function(x) { return /desconect/.test(x.t); }), JSON.stringify(E));
+  check('ya no salen mensajes a Citlali', !E.some(function(x) { return /desconect/.test(x.t); }), JSON.stringify(E));
 
-  console.log('\nRecordatorio con el nombre primero ("Roxana se tiene que desconectar")');
+  console.log('\nPedido con el nombre primero ("Roxana se tiene que desconectar")');
   await reset();
   await control.procesar('Se conecta\nCajón 44\nRoxana Ali\n22B222 Tesla\n11:45 A 2:45');
   limpiar();
   await control.procesar('Roxana se tiene que desconectar');
-  check('se envía el recordatorio a Roxana', E.some(function(x) { return /Roxana Ali/.test(x.t) && /desconecta/.test(x.t); }), JSON.stringify(E));
+  check('se avisa a Alma por Roxana y NO se le escribe a ella', E.length === 0 && P.some(function(t) { return /Roxana Ali/.test(t) && /Alma: avisa tú/.test(t); }), JSON.stringify({ E, P }));
 
-  console.log('\nRespuesta del usuario en Eléctricos: detiene recordatorios y avisa; NUNCA libera el cajón');
+  console.log('\nRespuesta del usuario en Eléctricos a su aviso de tiempo vencido: avisa a Alma; NUNCA libera el cajón');
   await reset();
   await db.agregarFila('5215500000007', 'Citlali Guzmán');
-  await control.procesar('Se conecta\nCajón 45\nCitlali Guzmán\n11A111 BYD\n1:30 A 4:30');
-  await control.procesar('Se tiene que desconectar Citlali');
+  await control.procesar('Se conecta\nCajón 45\nCitlali Guzmán\n11A111 BYD\n11:45 A 2:45');
+  await avanzar(15 * MIN + 1000);   // 2:45: se vence su tiempo (ya recibió su único aviso)
   limpiar();
-  check('"sí" de alguien SIN recordatorio no hace nada', (await control.respuestaUsuario('5215599999999', 'Otra', 'Sí')) === false && P.length === 0);
+  check('"sí" de alguien SIN cajón vencido no hace nada', (await control.respuestaUsuario('5215599999999', 'Otra', 'Sí')) === false && P.length === 0);
   check('"todavía no me desconecto" NO cuenta', (await control.respuestaUsuario('5215500000007', 'Cit', 'todavía no me desconecto')) === false);
   check('"Ya me desconecté desde hace rato" con su número → atendido', (await control.respuestaUsuario('5215500000007', 'Cit', 'Ya me desconecté desde hace rato')) === true);
-  check('se detienen SUS recordatorios', Object.keys(control._pendientes).length === 0);
   check('el cajón 45 SIGUE ocupado (solo el ayudante lo libera)', cj('45').ocupado === true && cj('45').usuario_actual === 'Citlali Guzmán');
   check('Proyecto Bot: pide que el ayudante confirme (Se desconecta / 45 libre)', P.some(function(t) { return /Citlali Guzmán/.test(t) && /ayudante debe confirmarlo/.test(t) && /45 libre/.test(t); }), JSON.stringify(P));
   limpiar();
-  await avanzar(15 * MIN); await avanzar(15 * MIN);
-  check('no salen más recordatorios', !E.some(function(x) { return /desconecta/.test(x.t); }), JSON.stringify(E));
+  check('si repite lo mismo, no se duplica el aviso', (await control.respuestaUsuario('5215500000007', 'Cit', 'ya me desconecté')) === true && P.length === 0);
   await control.procesar('Se desconecta Citlali');
   check('cuando el ayudante confirma, ahí sí se libera', cj('45').ocupado === false);
 
-  console.log('\n"Sí" a un recordatorio (Ashley, captura del 4 nov 7:33 p. m.)');
+  console.log('\nRespuesta del usuario dentro de la alerta: si dijo "ya me desconecté" la alerta a Alma lo cita');
+  await reset();
+  await db.conectarUsuario('44', 'Arturo Montaño', '777', tiempo.horaLaboralAISO('11:45'));
+  await timers.reactivarTimerSesionCajon('44');
+  await avanzar(15 * MIN + 1000);
+  check('"ya me desconecté" de Arturo tras el aviso', (await control.respuestaUsuario('777', 'Arturo', 'ya me desconecté')) === true);
+  limpiar();
+  await avanzar(15 * MIN + 1000);
+  check('la alerta de los 15 min cita lo que escribió y pide confirmación del ayudante', P.length === 1 && /🚨/.test(P[0]) && /ya me desconecté/.test(P[0]) && /falta la confirmación del ayudante/.test(P[0]), JSON.stringify(P));
+  control._detener();
+
+  console.log('\n"Sí" al aviso de vencimiento (Ashley, captura del 4 nov 7:33 p. m.)');
   await reset();
   await db.agregarFila('5215500000008', 'Ashley Albarrán');
   await control.procesar('Se conecta\nCajón 42\nAshley Albarrán\n33G579 Tesla\n11:45 A 2:45');
-  await control.procesar('Se tiene que desconectar Ashley');
+  await avanzar(15 * MIN + 1000);
   limpiar();
-  check('"Si" con su número detiene los recordatorios', (await control.respuestaUsuario('5215500000008', 'Ashly Albarran', 'Si')) === true && Object.keys(control._pendientes).length === 0);
+  check('"Si" con su número → aviso a Alma', (await control.respuestaUsuario('5215500000008', 'Ashly Albarran', 'Si')) === true && P.length === 1);
   check('y el cajón 42 sigue ocupado', cj('42').ocupado === true);
 
-  console.log('\nRespuesta de alguien sin teléfono registrado: solo se avisa, NO se detienen recordatorios');
+  console.log('\nRespuesta de alguien sin teléfono registrado: solo avisa si dice que YA se desconectó');
   await reset();
   await control.procesar('Se conecta\nCajón 41\nCitlali Guzmán\n11A111 BYD\n11:45 A 2:45');
-  await control.procesar('Se tiene que desconectar Citlali');
+  await avanzar(15 * MIN + 1000);
   limpiar();
-  check('"Ya me desconecté" de «Cit» (sin número en el bot) → aviso a Proyecto Bot', (await control.respuestaUsuario('5215514385349', 'Cit', 'Ya me desconecté desde hace rato')) === true && P.some(function(t) { return /«Cit»/.test(t) && /Citlali Guzmán/.test(t) && /NO detuve/.test(t); }), JSON.stringify(P));
-  check('los recordatorios de Citlali siguen activos', Object.keys(control._pendientes).length === 1);
+  check('"Ya me desconecté" de «Cit» (sin número en el bot) → aviso a Proyecto Bot', (await control.respuestaUsuario('5215514385349', 'Cit', 'Ya me desconecté desde hace rato')) === true && P.some(function(t) { return /«Cit»/.test(t) && /Citlali Guzmán/.test(t) && /sin teléfono/.test(t); }), JSON.stringify(P));
   check('un "sí" sin número NO se acepta', (await control.respuestaUsuario('5215514385349', 'Cit', 'Sí')) === false);
   limpiar();
   check('no repite el aviso por nombre', (await control.respuestaUsuario('5215514385349', 'Cit', 'ya me desconecté')) === false && P.length === 0);

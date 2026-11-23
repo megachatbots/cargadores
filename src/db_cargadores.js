@@ -150,6 +150,22 @@ async function renombrarEnFila(numero, nuevo) {
   return { antes: antes, persistido: persistido, posicion: estado.fila.indexOf(u) + 1 };
 }
 function getAlias(numero) { return aliasNombres[numero] || null; }
+// Personas de la lista estática (todas las del día, aunque ya no estén en la fila) con ese nombre exacto
+function buscarEnEstatica(nombre) {
+  const n = String(nombre || '').toLowerCase().trim();
+  return (estado.lista_estatica || []).filter(function(u) { return String(u.nombre || '').toLowerCase().trim() === n; });
+}
+// Alias para alguien que ya salió de la fila: corrige la lista estática y deja el alias para sus próximas solicitudes
+async function renombrarEnEstatica(numero, nuevo) {
+  const u = (estado.lista_estatica || []).find(function(x) { return x.numero === numero; });
+  if (!u) return null;
+  const antes = u.nombre;
+  u.nombre = nuevo;
+  _bit('renombre', u, '«' + antes + '» → «' + nuevo + '» (ya fuera de la fila)');
+  if (!esManual(numero)) { aliasNombres[numero] = nuevo; await pgSet('alias_nombres', aliasNombres); }
+  await guardar('renombrar en estatica');
+  return { antes: antes };
+}
 
 // Entradas manuales: no tienen teléfono (numero = 'manual_N'); nunca se mencionan en Eléctricos
 function esManual(numero) { return String(numero || '').indexOf('manual_') === 0; }
@@ -365,8 +381,16 @@ async function marcarTiempoCumplido(cajon) {
   if (!c || !c.ocupado) return null;
   c.timer_sesion = Object.assign({}, c.timer_sesion, { activo: false, cumplido: true });
   c.recordatorios = 0;
+  c.cumplido_en = tiempo.ahoraISO();   // base de la alerta a Alma (+15 min) y de los minutos de exceso
+  c.alerta_vencido = false;
   await guardar('tiempo cumplido ' + cajon);
   return c;
+}
+async function marcarAlertaVencido(cajon) {
+  const c = estado.cargadores[String(cajon)];
+  if (!c || !c.ocupado) return;
+  c.alerta_vencido = true;
+  await guardar('alerta vencido ' + cajon);
 }
 async function marcarRecordatorios(cajon, n) {
   const c = estado.cargadores[String(cajon)];
@@ -650,9 +674,9 @@ module.exports = {
   cargadorLibre, numLibres, numLibresTotal, tiempoEstimado, listaAbierta, vipAbierto, setLista, setVip, nuevoDiaLista, cajonesActivos,
   iniciarTimerConexion, extenderTimerConexion, confirmarConexion, liberarCajon,
   conectarUsuario, buscarCajonDeUsuario, buscarEnFila,
-  cargarEstadoInicial, ocupantes, renombrarOcupante, ajustarInicio, marcarTiempoCumplido, marcarRecordatorios, cargarGrupos, guardarGrupos, cargarSilencio, guardarSilencio,
+  cargarEstadoInicial, ocupantes, renombrarOcupante, ajustarInicio, marcarTiempoCumplido, marcarAlertaVencido, marcarRecordatorios, cargarGrupos, guardarGrupos, cargarSilencio, guardarSilencio,
   setPendiente, getPendiente, marcarLlamado, limpiarLlamado, limpiarLlamadosCajon, getLlamadoActivo,
   resumenFila, resumenCargadores, resumenCompleto, resumenListaEstatica,
-  bitacoraFila, renombrarEnFila, getAlias, anotarManual, moverEnFila, posicionMinima, esManual, buscarEnFilaTolerate,
+  bitacoraFila, renombrarEnFila, getAlias, buscarEnEstatica, renombrarEnEstatica, anotarManual, moverEnFila, posicionMinima, esManual, buscarEnFilaTolerate,
   MS_CONEXION, MS_SESION, MS_SESION_VIP, CAJONES, CAJONES_VIP
 };

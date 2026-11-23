@@ -81,7 +81,16 @@ function crear(db) {
     const exactos = nq ? candidatos().filter(function(c) { return ayudante.normalizar(c.nombre) === nq; }) : [];
     // Forma "M es Miguel": solo nombre EXACTO (una frase cualquiera del admin con "es" no debe renombrar a nadie). Tolerante solo con "N se llama X".
     const ms = exactos.length || soloSiExiste ? exactos : buscar(quien);
-    if (!ms.length) return soloSiExiste ? null : '❌ «' + quien + '» no está en la fila';
+    if (!ms.length) {
+      // Ya no está en la fila (conectado, quitado…): si está en la lista del día, se deja el alias igual para sus próximas solicitudes
+      const est = db.buscarEnEstatica(quien);
+      if (est.length === 1) {
+        const r = await db.renombrarEnEstatica(est[0].numero, nombre);
+        return '✅ «' + quien + '» ya no estaba en la fila, pero sí en la lista de hoy: ahora es *' + nombre + '* (guardado: cuando vuelva a escribir se anotará con ese nombre).';
+      }
+      if (est.length > 1) return '❓ Hay ' + est.length + ' personas «' + quien + '» en la lista de hoy y ninguna está en la fila. No cambié nada.';
+      return soloSiExiste ? null : '❌ «' + quien + '» no está en la fila';
+    }
     if (ms.length > 1) return '❓ «' + quien + '» coincide con varios en la fila:\n' + listar(ms) + '\nNo cambié nada. Usa *N se llama ' + nombre + '* con el número de posición.';
     return renombrarU(fila[ms[0].pos - 1], nombre);
   }

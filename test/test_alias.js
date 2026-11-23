@@ -44,6 +44,17 @@ const run = async function(t) { const c = filaCmd.interpretar(t); return c ? fc.
   const ms = ayud.buscarPorNombre('Miguel Ángel Martínez', db.getEstado().fila.map(function(u) { return { id: u.numero, nombre: u.nombre, numero: u.numero }; }));
   check('"Miguel Ángel Martínez" reconoce a "Miguel Angel" de la fila', ms.length === 1 && ms[0].numero === '5215500000003', JSON.stringify(ms));
 
+  console.log('\nCaso real: "M" ya salió de la fila (conectado) pero sigue en la lista de hoy');
+  await db.reiniciarTodo();
+  for (const [n, nom] of [['5215500000011', 'My'], ['5215500000012', 'M'], ['5215500000013', 'Mj']]) await db.agregarFila(n, nom);
+  await db.quitarFila('5215500000012');
+  const rE = await run('M es Miguel Angel');
+  check('responde y deja el alias aunque M ya no esté en la fila', /ya no estaba en la fila/.test(rE) && db.getAlias('5215500000012') === 'Miguel Angel', rE);
+  check('la lista estática muestra el nombre real', db.resumenListaEstatica().indexOf('Miguel Angel') !== -1);
+  await db.agregarFila('5215500000012', 'M');
+  check('mañana entra como "Miguel Angel"', db.getEstado().fila[db.getEstado().fila.length - 1].nombre === 'Miguel Angel');
+  check('si nadie se llama así ni en la lista de hoy: silencio', (await run('Zzz es Fulano')) === null);
+
   console.log('\nResultado: ' + ok + '/' + (ok + fail) + ' ✅  ' + fail + ' ❌');
   process.exit(fail ? 1 : 0);
 })().catch(function(e) { console.error('💥', e); process.exit(2); });
