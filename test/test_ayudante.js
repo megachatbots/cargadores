@@ -150,5 +150,14 @@ check('REAL "Alejamos Espinosa / Se desconecta" → confirmación', e.length ===
 check('"Se desconecta\\n\\nNombre" (orden inverso) sigue igual', j(ev('Se desconecta\n\nCitlali')) === j([{ tipo: 'desconectaron', nombres: ['Citlali'] }]), j(ev('Se desconecta\n\nCitlali')));
 check('REAL "Rossy Curiel desconectada" y "Libre 42" siguen igual', ev('Rossy Curiel desconectada')[0].tipo === 'desconectaron' && lib('Libre 42') === '42');
 
+console.log('\nLista del 24 nov (caso real): estado sin la palabra "conectado" ("Antes de las 7", "Carga extendida", "Conetado")');
+const lista24 = 'Esto lo mando el.control de cargadores\n\n 41\nDavid Shelfeld \nChevrolet plata 33K048 \nConectado 7:10 a 10:10\n\n42\nRamón Malpica \nTesla BLANCO 98J942 \nAntes de las 7\n\n44\nEdgar Coli \nXpeng Blanco 78k131 \n Antes de las 7\n\n 45\nAlejandro Alcantara \nByd Gris 83J496  \nConectado 7:42 a 10:42\n\n 46\nJavier Jara \nBMW Negro 77J430  \nCarga extendida \n\n48\nAlmir \nLink&co Negra 11H384 \nConectado 7:38 a 10:38\n\n 49\nPablo Monsalvo \nTesla Rojo 33G195  \nConetado 7:42 a 10:42\n\n 50\nCésar Mora \nBMW Negro 19J257 \nCarga extendida';
+e = ev(lista24);
+check('REAL: los 8 cajones se reconocen (antes solo 41, 45 y 48)', e.length === 8 && j(e.map(function(x) { return x.cajon; })) === j(['41', '42', '44', '45', '46', '48', '49', '50']), j(e.map(function(x) { return x.cajon; })));
+check('   · "Antes de las 7" → inicio 7:00 (42 y 44), placas y marca', e[1].horaInicio === '7:00' && e[1].placas === '98J942' && e[1].marca === 'Tesla BLANCO' && e[2].nombre === 'Edgar Coli' && e[2].horaInicio === '7:00', j([e[1], e[2]]));
+check('   · "Carga extendida" → sin hora (46 y 50)', e[4].nombre === 'Javier Jara' && e[4].horaInicio === null && e[7].nombre === 'César Mora' && e[7].horaInicio === null, j([e[4], e[7]]));
+check('   · "Conetado 7:42 a 10:42" (falta de ortografía) → 49 con horario', e[6].cajon === '49' && e[6].horaInicio === '7:42' && e[6].horaFin === '10:42', j(e[6]));
+check('"46\\nCarga extendida" sin nombre, "48\\nLibre uso extendido" y "41\\nLibre" NO son conexiones', ev('46\nCarga extendida').length === 0 && ev('48\nLibre uso extendido').length === 0 && ev('41\nLibre').filter(function(x) { return x.tipo === 'conecta'; }).length === 0);
+
 console.log('\nResultado: ' + ok + '/' + (ok + fail) + ' ✅  ' + fail + ' ❌');
 process.exit(fail ? 1 : 0);

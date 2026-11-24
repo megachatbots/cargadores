@@ -41,7 +41,7 @@ let conectado       = false;
 let sockRef         = null;
 let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion;
 
-const VERSION = 'etapa1c-8';
+const VERSION = 'etapa1c-9';
 // Miembros de Eléctricos (solo a ellos se les menciona). null = aún no cargado → no se filtra.
 let miembrosElectricos = null;
 const _noMiembroAvisado = new Set();

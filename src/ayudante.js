@@ -189,7 +189,10 @@ function parsearConexiones(t) {
 //    "41\nAlix Córdoba\nByd 02G518\nConectada antes de 7 am."   (varios bloques en un mensaje, separados o no por línea en blanco)
 //    "46\nJavier Jara\nBMW 77j430\nConectado uso extendido"      (sin hora → se cuenta desde ahora)
 const RE_LINEA_CAJON = /^\s*(\d{2})\s*[.:]?\s*$/;
-const RE_CONECTADO = /(?<![a-záéíóúñ])conectad[oa]s?(?![a-záéíóúñ])/i;
+// "Conectado/a", con las faltas de ortografía vistas ("Conetado")
+const RE_CONECTADO = /(?<![a-záéíóúñ])(?:conectad|conetad|conectd|concetad)[oa]s?(?![a-záéíóúñ])/i;
+// Línea de estado SIN la palabra "conectado": "Antes de las 7", "Carga extendida", "Uso extendido", "7:10 a 10:10"
+const RE_ESTADO_SIN_PALABRA = /^\s*(?:antes\s+de|carga\s+extendida|uso\s+extendido)|^\s*\d{1,2}[:.]\d{2}\s*(?:[-–—]|\ba\b|\bal\b|\bhasta\b)\s*\d/i;
 function parsearConexionesPorNumero(t) {
   const lineas = t.split('\n');
   const bloques = [];
@@ -202,12 +205,12 @@ function parsearConexionesPorNumero(t) {
   const eventos = [];
   bloques.forEach(function(b) {
     if (CAJONES_VALIDOS.indexOf(b.cajon) === -1 || !b.lineas.length) return;
-    const iEstado = b.lineas.findIndex(function(l) { return RE_CONECTADO.test(l); });
-    if (iEstado === -1) return;                                   // sin "conectado/a": no es una conexión
+    const iEstado = b.lineas.findIndex(function(l) { return RE_CONECTADO.test(l) || RE_ESTADO_SIN_PALABRA.test(l); });
+    if (iEstado === -1) return;                                   // ni "conectado/a" ni horario / "antes de" / "extendida": no es una conexión
     const lEst = b.lineas[iEstado];
     const mc = lEst.match(RE_CONECTADO);
-    const antes = lEst.slice(0, mc.index).trim();                 // lo que va antes de "conectada" en esa línea
-    const despues = lEst.slice(mc.index + mc[0].length).trim();   // horario / "antes de 7 am" / "uso extendido"
+    const antes = mc ? lEst.slice(0, mc.index).trim() : '';       // lo que va antes de "conectada" en esa línea
+    const despues = mc ? lEst.slice(mc.index + mc[0].length).trim() : lEst;   // horario / "antes de 7 am" / "uso extendido"
     if (/falla|foco|no funciona|no carga|bloquead|mantenimiento|descompuest|averi/i.test(b.lineas.join(' '))) return;
     if (/\bno\s+(?:se\s+)?(?:ha\s+)?conectad/i.test(lEst)) return;   // "no se ha conectado"
     const previas = b.lineas.slice(0, iEstado);                   // nombre y (opcional) marca/placas en líneas propias
